@@ -97,7 +97,7 @@ Because the two modes use separate containers (`pipod-<slug>-nonet` for `--no-ne
 `pipod-<slug>`), switching between them is instant, but each container keeps its own installed packages.
 `-r` only recreates the corresponding container.
 
-## Building the Image
+## About the Docker Image
 
 The Docker image is based on Ubuntu 26.04 (with a plan to stick to Ubuntu LTS releases) and is built automatically by
 `./pipod` if it does not already exist. Passwordless sudo is enabled in the container to make dependency installation
