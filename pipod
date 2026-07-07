@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ -w /proc/self/comm ]; then
+    echo pipod > /proc/self/comm || true
+fi
+
+show_help() {
+    cat <<'EOF'
+Usage: pipod [OPTIONS] [COMMAND]
+
+Run the pi coding agent inside an isolated Docker container.
+One persistent container is created per workspace directory.
+
+Commands:
+  bash              Open an interactive bash shell inside the container
+
+Options:
+  -nn, --no-network Only allow access to the host (host.docker.internal), block the Internet.
+                    Uses a separate container, so toggling -nn keeps each mode's installed packages.
+  -r, --recreate    Force recreate the container (image is rebuilt from cache)
+  --no-cache        Build the image without Docker cache (forces pi upgrade)
+  -h, --help        Show this help message and exit
+EOF
+}
+
+# Scan the pipod config root (~/.pi/pipod) for entries not owned by the
+# invoking user and chown them back. Docker creates bind-mount sources as
+# root when the host path is missing at `docker run`/`docker start` time, so a
+# config tree that was deleted (or never created) can come back root-owned and
+# trigger EACCES for the in-container ubuntu user — both root-owned ancestors
+# (which would block the `mkdir -p` in prepare_config) and stale root-owned
+# descendants left behind by an older mount layout. Requires `sudo -n` if
+# anything is root-owned; otherwise exits with the exact command to run.
+recover_root_owned() {
+    local root="$1"
+    [ -d "$root" ] || return 0
+    local found
+    found="$(find "$root" ! -uid "$(id -u)" -prune -print 2>/dev/null || true)"
+    if [ -n "$found" ]; then
+        if sudo -n true 2>/dev/null; then
+            while IFS= read -r entry; do
+                [ -n "$entry" ] && sudo chown -R "$(id -u):$(id -g)" "$entry"
+            done <<< "$found"
+        else
+            echo "pipod: '$root' has root-owned entries; run: sudo chown -R $(id -u):$(id -g) \"$root\"" >&2
+            exit 1
+        fi
+    fi
+}
+
+# Ensure the shared no-Internet network exists as an `--internal` bridge.
+# `--internal` is what actually blocks egress (a masquerade-disabled network
+# does not on every host); host access is preserved separately by pointing
+# host.docker.internal at this network's on-link gateway. If a same-named
+# network exists but isn't internal (a stale earlier attempt), recreate it —
+# only possible when no container is attached, hence the -r guidance.
+ensure_no_net_network() {
+    local net="$1"
+    if docker network inspect "$net" >/dev/null 2>&1; then
+        [ "$(docker network inspect -f '{{.Internal}}' "$net")" = "true" ] && return
+        docker network rm "$net" >/dev/null 2>&1 || {
+            echo "pipod: '$net' exists with the wrong config and can't be removed (a container is still attached)." >&2
+            echo "       Run './pipod -r -nn' to recreate the container first." >&2
+            exit 1
+        }
+    fi
+    echo "Creating no-Internet network $net"
+    docker network create --internal "$net" >/dev/null
+}
+
+# Copy models.json/auth.json from the host's ~/.pi/agent into $dst_dir when
+# missing, rewriting localhost/127.0.0.1 to host.docker.internal.
+bootstrap_config() {
+    local dst_dir="$1"
+    for f in models.json auth.json; do
+        local src="$HOME/.pi/agent/$f"
+        local dst="$dst_dir/$f"
+        if [ ! -e "$dst" ] && [ -f "$src" ]; then
+            echo "Using $src for $dst"
+            sed -E 's/(localhost|127\.0\.0\.1)/host.docker.internal/g' "$src" > "$dst"
+            chmod "$(stat -c '%a' "$src" 2>/dev/null || stat -f '%Lp' "$src")" "$dst"
+        fi
+    done
+}
+
+# Prepare host-side config before bringing up the container: recover any
+# root-owned entries under the config root (so the dirs below can be created),
+# create the shared config and per-workspace dirs, and bootstrap
+# models.json/auth.json from the host if missing. Runs on every invocation so
+# a deleted config tree is recovered even when reusing a container.
+prepare_config() {
+    recover_root_owned "$CONFIG_DIR"
+    mkdir -p "$CONFIG_DIR/agent" "$WS_DIR/sessions"
+    bootstrap_config "$CONFIG_DIR/agent"
+    if [ -d "$WS_DIR/agent" ]; then
+        bootstrap_config "$WS_DIR/agent"
+    fi
+}
+
+RECREATE=false
+NO_CACHE=""
+SHELL_MODE=false
+NO_NETWORK=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -nn|--no-network) NO_NETWORK=true; shift ;;
+        -r|--recreate) RECREATE=true; shift ;;
+        --no-cache)   NO_CACHE=--no-cache; shift ;;
+        -h|--help)    show_help; exit 0 ;;
+        bash)         SHELL_MODE=true; shift ;;
+        *) echo "pipod: unknown option: $1" >&2; show_help >&2; exit 1 ;;
+    esac
+done
+
+if ! command -v docker &>/dev/null; then
+    echo "pipod: Docker is not installed (or not on PATH). Please install Docker and try again." >&2
+    exit 1
+fi
+
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+WORKSPACE_DIR="$(pwd)"
+CONFIG_DIR="$HOME/.pi/pipod"
+WS_SLUG="${WORKSPACE_DIR//[^a-zA-Z0-9_-]/_}"
+WS_DIR="$CONFIG_DIR/workspaces/$WS_SLUG"
+CONTAINER_NAME="pipod-$WS_SLUG"
+[ "$NO_NETWORK" = true ] && CONTAINER_NAME="pipod-${WS_SLUG}-nonet"
+# Shared `--internal` Docker network used by `--no-network`: it blocks all
+# egress to the Internet. The host stays reachable because host.docker.internal
+# is pointed at this network's on-link gateway (NOT `host-gateway`, which
+# resolves to docker0 and would be off-subnet/unreachable here).
+NO_NET_NETWORK="pipod-no-net"
+
+# Remove existing container if -r.
+EXISTING=$(docker ps -aq -f name=^${CONTAINER_NAME}$)
+if [ -n "$EXISTING" ] && [ "$RECREATE" = true ]; then
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    EXISTING=""
+fi
+
+# Prompt to recreate; clears EXISTING on yes.
+confirm_recreate() {
+    local message="$1"
+    echo "Configuration for $CONTAINER_NAME is out of date:"
+    echo "$message"
+    echo "Recreating applies the new config but discards anything installed inside the container (apt/npm packages, etc.)."
+    read -r -p "Recreate $CONTAINER_NAME? (Y/n) " _answer || _answer=""
+    if [[ ! "$_answer" =~ ^[Nn] ]]; then
+        echo "Recreating $CONTAINER_NAME"
+        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        EXISTING=""
+    else
+        echo "Keeping $CONTAINER_NAME; the new config will not take effect this run (use ./pipod -r to force)."
+    fi
+}
+
+if [ -n "$EXISTING" ]; then
+    expected=$( {
+        printf '%s -> /workspace\n' "$WORKSPACE_DIR"
+        printf '%s -> /home/ubuntu/.pi\n' "$CONFIG_DIR"
+        [ -d "$WS_DIR/agent" ] && printf '%s -> /home/ubuntu/.pi/agent\n' "$WS_DIR/agent"
+        printf '%s -> /home/ubuntu/.pi/agent/sessions\n' "$WS_DIR/sessions"
+    } | sort -u )
+    actual=$( docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | grep -E ' -> (/workspace|/home/ubuntu/\.pi)(/|$)' | sort -u || true )
+    if [ -n "$actual" ] && [ "$expected" != "$actual" ]; then
+        missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))
+        extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))
+        _msg=""
+        [ -n "$missing" ] && _msg+="missing mount: $missing"$'\n'
+        [ -n "$extra" ] && _msg+="  extra mount: $extra"$'\n'
+        confirm_recreate "${_msg%$'\n'}"
+    fi
+fi
+
+# Ensure host-side config & workspace dirs are present and owned by us before
+# bringing the container up (Docker recreates missing bind-mount sources as
+# root, which makes them unwritable by the in-container ubuntu user).
+prepare_config
+
+if [ -z "$EXISTING" ]; then
+    # No existing container — build the image and create one.
+    echo "Building a new container $CONTAINER_NAME"
+    docker build \
+        $NO_CACHE \
+        --build-arg HOST_UID="$(id -u)" \
+        --build-arg HOST_GID="$(id -g)" \
+        -t pipod-pi-coding-agent \
+        "$PROJECT_DIR"
+
+    VOLUMES=(
+        -v "$WORKSPACE_DIR:/workspace"
+        -v "$CONFIG_DIR:/home/ubuntu/.pi"
+    )
+    if [ -d "$WS_DIR/agent" ]; then
+        VOLUMES+=(-v "$WS_DIR/agent:/home/ubuntu/.pi/agent")
+    fi
+    VOLUMES+=(-v "$WS_DIR/sessions:/home/ubuntu/.pi/agent/sessions")
+
+    # --no-network: attach to the shared --internal network (egress blocked)
+    # and point host.docker.internal at that network's on-link gateway so the
+    # host stays reachable. `host-gateway` resolves to docker0, which is
+    # off-subnet for an internal network and would be dropped, so the gateway
+    # IP is used directly. Otherwise the default bridge + host-gateway is used.
+    NETWORK_OPT=""
+    ADD_HOST=(--add-host=host.docker.internal:host-gateway)
+    if [ "$NO_NETWORK" = true ]; then
+        ensure_no_net_network "$NO_NET_NETWORK"
+        gw="$(docker network inspect -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' "$NO_NET_NETWORK" 2>/dev/null)"
+        NETWORK_OPT="--network=$NO_NET_NETWORK"
+        ADD_HOST=(--add-host=host.docker.internal:"${gw:-host-gateway}")
+    fi
+
+    echo "Starting container $CONTAINER_NAME"
+    docker run -d \
+        --name "$CONTAINER_NAME" \
+        --entrypoint sleep \
+        "${ADD_HOST[@]}" \
+        $NETWORK_OPT \
+        -e PI_CODING_AGENT_DIR=/home/ubuntu/.pi/agent \
+        "${VOLUMES[@]}" \
+        -w /workspace \
+        pipod-pi-coding-agent \
+        infinity
+else
+    # Existing container — bring it to a usable state.
+    WAITED=0
+    while true; do
+        STATUS=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "missing")
+        case "$STATUS" in
+            running)
+                # If only the idle sleep process remains, a stop may be in progress.
+                if [ "$(docker top "$CONTAINER_NAME" -o pid 2>/dev/null | tail -n +2 | wc -l)" -le 1 ] && [ "$WAITED" -lt 15 ]; then
+                    [[ "$WAITED" -eq 0 ]] && echo "Waiting for $CONTAINER_NAME to finish stopping"
+                    sleep 1; WAITED=$((WAITED + 1)); continue
+                fi
+                break
+                ;;
+            exited|dead|created)
+                echo "Starting container $CONTAINER_NAME"
+                docker start "$CONTAINER_NAME" >/dev/null
+                break
+                ;;
+            paused)
+                echo "Unpausing container $CONTAINER_NAME"
+                docker unpause "$CONTAINER_NAME" >/dev/null
+                break
+                ;;
+            *)
+                [[ "$WAITED" -eq 0 ]] && echo "Waiting for $CONTAINER_NAME to reach a stable state"
+                sleep 1; WAITED=$((WAITED + 1))
+                ;;
+        esac
+    done
+fi
+
+# Probe real outbound connectivity and host reachability for --no-network.
+probe_internet() {
+    docker exec "$CONTAINER_NAME" node -e '
+      const s = require("net").connect(443, "1.1.1.1");
+      s.setTimeout(2000);
+      s.on("connect",  () => process.exit(0));
+      s.on("error",    () => process.exit(1));
+      s.on("timeout",  () => { s.destroy(); process.exit(1); });
+    ' >/dev/null 2>&1
+}
+# REFUSED on a closed port means the host stack answered (reachable); timeout means unreachable.
+probe_host() {
+    docker exec "$CONTAINER_NAME" node -e '
+      const s = require("net").connect(9, "host.docker.internal");
+      s.setTimeout(2000);
+      s.on("connect",  () => process.exit(0));
+      s.on("error",    e => process.exit((e.code==="ECONNREFUSED"||e.code==="EACCES"||e.code==="ECONNRESET") ? 0 : 1));
+      s.on("timeout",  () => { s.destroy(); process.exit(1); });
+    ' >/dev/null 2>&1
+}
+if [ "$NO_NETWORK" = true ]; then
+    # The container is on $NO_NET_NETWORK by construction (encoded in its name);
+    # verify the isolation actually holds rather than trusting the network name.
+    if probe_internet; then
+        echo "pipod: --no-network is set but $CONTAINER_NAME can still reach the Internet." >&2
+        echo "pipod: egress isn't blocked — recreate the network with:" >&2
+        echo "         docker network rm $NO_NET_NETWORK && ./pipod -r -nn" >&2
+    elif ! probe_host; then
+        echo "pipod: --no-network is set but $CONTAINER_NAME can't reach the host (host.docker.internal)." >&2
+        echo "pipod: the host should still be reachable — recreate the network with:" >&2
+        echo "         docker network rm $NO_NET_NETWORK && ./pipod -r -nn" >&2
+    else
+        echo "Network: isolated ($NO_NET_NETWORK) — host reachable, no Internet."
+    fi
+fi
+
+# Run a pi session or bash shell.
+if [ "$SHELL_MODE" = true ]; then
+    echo "Opening bash shell inside $CONTAINER_NAME container"
+    docker exec -it "$CONTAINER_NAME" bash
+else
+    echo "Starting a new pi session inside $CONTAINER_NAME container"
+    docker exec -it "$CONTAINER_NAME" pi
+fi
+
+# Auto-stop container when only the sleep idle process remains.
+if [ "$(docker top "$CONTAINER_NAME" -o pid 2>/dev/null | tail -n +2 | wc -l)" -le 1 ]; then
+    echo "Stopping $CONTAINER_NAME"
+    docker kill "$CONTAINER_NAME" >/dev/null 2>&1 &
+fi
