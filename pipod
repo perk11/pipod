@@ -7,19 +7,22 @@ fi
 
 show_help() {
     cat <<'EOF'
-Usage: pipod [OPTIONS] [COMMAND]
+Usage: pipod [claude] [OPTIONS] [COMMAND]
 
-Run the pi coding agent inside an isolated Docker container.
-One persistent container is created per workspace directory.
+Run the pi (or Claude Code) agent inside an isolated Docker container.
+One persistent container is created per workspace directory, per agent.
 
 Commands:
+  claude            Run the Claude Code agent instead of pi. This selects a
+                    separate image and container (pipod-claude-...) and can be
+                    combined with all options below, e.g. `pipod claude bash`.
   bash              Open an interactive bash shell inside the container
 
 Options:
   -nn, --no-network Only allow access to the host (host.docker.internal), block the Internet.
                     Uses a separate container, so toggling -nn keeps each mode's installed packages.
   -r, --recreate    Force recreate the container (image is rebuilt from cache)
-  --no-cache        Build the image without Docker cache (forces pi upgrade)
+  --no-cache        Build the image without Docker cache (forces an agent upgrade)
   -h, --help        Show this help message and exit
 EOF
 }
@@ -69,13 +72,18 @@ ensure_no_net_network() {
     docker network create --internal "$net" >/dev/null
 }
 
-# Copy models.json/auth.json from the host's ~/.pi/agent into $dst_dir when
-# missing, rewriting localhost/127.0.0.1 to host.docker.internal.
+# Copy essential config (auth + base settings) from the host's agent dir into
+# $dst_dir when missing, rewriting localhost/127.0.0.1 to host.docker.internal
+# so locally-served models/gateways stay reachable. For pi: models.json +
+# auth.json from ~/.pi/agent. For Claude Code: .credentials.json (auth) +
+# settings.json from ~/.claude. The file set and source dir are agent-specific
+# (BOOTSTRAP_FILES / BOOTSTRAP_SRC_DIR).
 bootstrap_config() {
     local dst_dir="$1"
-    for f in models.json auth.json; do
-        local src="$HOME/.pi/agent/$f"
-        local dst="$dst_dir/$f"
+    local f src dst
+    for f in "${BOOTSTRAP_FILES[@]}"; do
+        src="$BOOTSTRAP_SRC_DIR/$f"
+        dst="$dst_dir/$f"
         if [ ! -e "$dst" ] && [ -f "$src" ]; then
             echo "Using $src for $dst"
             sed -E 's/(localhost|127\.0\.0\.1)/host.docker.internal/g' "$src" > "$dst"
@@ -86,15 +94,15 @@ bootstrap_config() {
 
 # Prepare host-side config before bringing up the container: recover any
 # root-owned entries under the config root (so the dirs below can be created),
-# create the shared config and per-workspace dirs, and bootstrap
-# models.json/auth.json from the host if missing. Runs on every invocation so
-# a deleted config tree is recovered even when reusing a container.
+# create the shared config and per-workspace dirs, and bootstrap auth/settings
+# from the host if missing. Runs on every invocation so a deleted config tree
+# is recovered even when reusing a container.
 prepare_config() {
     recover_root_owned "$CONFIG_DIR"
-    mkdir -p "$CONFIG_DIR/agent" "$WS_DIR/sessions"
-    bootstrap_config "$CONFIG_DIR/agent"
-    if [ -d "$WS_DIR/agent" ]; then
-        bootstrap_config "$WS_DIR/agent"
+    mkdir -p "$SHARED_CONFIG_DIR" "$WS_DIR/sessions"
+    bootstrap_config "$SHARED_CONFIG_DIR"
+    if [ -d "$OVERRIDE_SRC" ]; then
+        bootstrap_config "$OVERRIDE_SRC"
     fi
 }
 
@@ -102,12 +110,14 @@ RECREATE=false
 NO_CACHE=""
 SHELL_MODE=false
 NO_NETWORK=false
+AGENT=pi
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -nn|--no-network) NO_NETWORK=true; shift ;;
         -r|--recreate) RECREATE=true; shift ;;
         --no-cache)   NO_CACHE=--no-cache; shift ;;
         -h|--help)    show_help; exit 0 ;;
+        claude)       AGENT=claude; shift ;;
         bash)         SHELL_MODE=true; shift ;;
         *) echo "pipod: unknown option: $1" >&2; show_help >&2; exit 1 ;;
     esac
@@ -123,8 +133,59 @@ WORKSPACE_DIR="$(pwd)"
 CONFIG_DIR="$HOME/.pi/pipod"
 WS_SLUG="${WORKSPACE_DIR//[^a-zA-Z0-9_-]/_}"
 WS_DIR="$CONFIG_DIR/workspaces/$WS_SLUG"
-CONTAINER_NAME="pipod-$WS_SLUG"
-[ "$NO_NETWORK" = true ] && CONTAINER_NAME="pipod-${WS_SLUG}-nonet"
+
+# Agent-specific layout. Each agent gets its own image, container-name prefix,
+# Dockerfile subdir, and config mount; the per-workspace session overlay is the
+# "make sessions unique per project" knob.
+#
+#   pi:      ~/.pi (= whole $CONFIG_DIR) holds agent state; PI_CODING_AGENT_DIR
+#            points at ~/.pi/agent; per-workspace sessions live under
+#            ~/.pi/agent/sessions.
+#   claude:  CLAUDE_CONFIG_DIR points at ~/.claude (mounted from
+#            $CONFIG_DIR/claude), which holds settings.json, CLAUDE.md, skills,
+#            agents, plugins and .credentials.json (auth). Per-project session
+#            transcripts and memory live under ~/.claude/projects, overlaid
+#            per workspace so each project's history is isolated.
+#
+# Note: Claude Code's ~/.claude.json (app state, per-project trust) is not
+# relocatable via CLAUDE_CONFIG_DIR and is intentionally left in-container; auth
+# persists through the shared .credentials.json under the mounted config dir.
+if [ "$AGENT" = claude ]; then
+    AGENT_LABEL="Claude Code"
+    IMAGE_TAG="pipod-claude"
+    CONTAINER_PREFIX="pipod-claude"
+    BUILD_DIR="$PROJECT_DIR/claude"
+    SHARED_CONFIG_DIR="$CONFIG_DIR/claude"
+    OVERRIDE_SRC="$WS_DIR/claude"
+    CONFIG_MOUNT_SRC="$CONFIG_DIR/claude"
+    CONFIG_MOUNT_DEST="/home/ubuntu/.claude"
+    OVERRIDE_DEST="/home/ubuntu/.claude"
+    SESSIONS_DEST="/home/ubuntu/.claude/projects"
+    CONFIG_ROOT="/home/ubuntu/.claude"
+    AGENT_ENV_VAR="CLAUDE_CONFIG_DIR=/home/ubuntu/.claude"
+    BOOTSTRAP_SRC_DIR="$HOME/.claude"
+    BOOTSTRAP_FILES=(.credentials.json settings.json)
+    RUN_CMD=claude
+else
+    AGENT_LABEL="pi"
+    IMAGE_TAG="pipod-pi-coding-agent"
+    CONTAINER_PREFIX="pipod"
+    BUILD_DIR="$PROJECT_DIR/pi"
+    SHARED_CONFIG_DIR="$CONFIG_DIR/agent"
+    OVERRIDE_SRC="$WS_DIR/agent"
+    CONFIG_MOUNT_SRC="$CONFIG_DIR"
+    CONFIG_MOUNT_DEST="/home/ubuntu/.pi"
+    OVERRIDE_DEST="/home/ubuntu/.pi/agent"
+    SESSIONS_DEST="/home/ubuntu/.pi/agent/sessions"
+    CONFIG_ROOT="/home/ubuntu/.pi"
+    AGENT_ENV_VAR="PI_CODING_AGENT_DIR=/home/ubuntu/.pi/agent"
+    BOOTSTRAP_SRC_DIR="$HOME/.pi/agent"
+    BOOTSTRAP_FILES=(models.json auth.json)
+    RUN_CMD=pi
+fi
+
+CONTAINER_NAME="$CONTAINER_PREFIX-$WS_SLUG"
+[ "$NO_NETWORK" = true ] && CONTAINER_NAME="${CONTAINER_NAME}-nonet"
 # Shared `--internal` Docker network used by `--no-network`: it blocks all
 # egress to the Internet. The host stays reachable because host.docker.internal
 # is pointed at this network's on-link gateway (NOT `host-gateway`, which
@@ -157,11 +218,14 @@ confirm_recreate() {
 if [ -n "$EXISTING" ]; then
     expected=$( {
         printf '%s -> /workspace\n' "$WORKSPACE_DIR"
-        printf '%s -> /home/ubuntu/.pi\n' "$CONFIG_DIR"
-        [ -d "$WS_DIR/agent" ] && printf '%s -> /home/ubuntu/.pi/agent\n' "$WS_DIR/agent"
-        printf '%s -> /home/ubuntu/.pi/agent/sessions\n' "$WS_DIR/sessions"
+        printf '%s -> %s\n' "$CONFIG_MOUNT_SRC" "$CONFIG_MOUNT_DEST"
+        [ -d "$OVERRIDE_SRC" ] && printf '%s -> %s\n' "$OVERRIDE_SRC" "$OVERRIDE_DEST"
+        printf '%s -> %s\n' "$WS_DIR/sessions" "$SESSIONS_DEST"
     } | sort -u )
-    actual=$( docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | grep -E ' -> (/workspace|/home/ubuntu/\.pi)(/|$)' | sort -u || true )
+    # Escape CONFIG_ROOT for use as a literal in the grep ERE (dots only; the
+    # mount destination lives under it, plus the /workspace mount).
+    config_root_ere="$(printf '%s' "$CONFIG_ROOT" | sed 's/\./\\./g')"
+    actual=$( docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' "$CONTAINER_NAME" 2>/dev/null | grep -E " -> (/workspace|${config_root_ere})(/|\$)" | sort -u || true )
     if [ -n "$actual" ] && [ "$expected" != "$actual" ]; then
         missing=$(comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))
         extra=$(comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"))
@@ -184,17 +248,17 @@ if [ -z "$EXISTING" ]; then
         $NO_CACHE \
         --build-arg HOST_UID="$(id -u)" \
         --build-arg HOST_GID="$(id -g)" \
-        -t pipod-pi-coding-agent \
-        "$PROJECT_DIR"
+        -t "$IMAGE_TAG" \
+        "$BUILD_DIR"
 
     VOLUMES=(
         -v "$WORKSPACE_DIR:/workspace"
-        -v "$CONFIG_DIR:/home/ubuntu/.pi"
+        -v "$CONFIG_MOUNT_SRC:$CONFIG_MOUNT_DEST"
     )
-    if [ -d "$WS_DIR/agent" ]; then
-        VOLUMES+=(-v "$WS_DIR/agent:/home/ubuntu/.pi/agent")
+    if [ -d "$OVERRIDE_SRC" ]; then
+        VOLUMES+=(-v "$OVERRIDE_SRC:$OVERRIDE_DEST")
     fi
-    VOLUMES+=(-v "$WS_DIR/sessions:/home/ubuntu/.pi/agent/sessions")
+    VOLUMES+=(-v "$WS_DIR/sessions:$SESSIONS_DEST")
 
     # --no-network: attach to the shared --internal network (egress blocked)
     # and point host.docker.internal at that network's on-link gateway so the
@@ -216,10 +280,10 @@ if [ -z "$EXISTING" ]; then
         --entrypoint sleep \
         "${ADD_HOST[@]}" \
         $NETWORK_OPT \
-        -e PI_CODING_AGENT_DIR=/home/ubuntu/.pi/agent \
+        -e "$AGENT_ENV_VAR" \
         "${VOLUMES[@]}" \
         -w /workspace \
-        pipod-pi-coding-agent \
+        "$IMAGE_TAG" \
         infinity
 else
     # Existing container — bring it to a usable state.
@@ -269,7 +333,7 @@ probe_host() {
       const s = require("net").connect(9, "host.docker.internal");
       s.setTimeout(2000);
       s.on("connect",  () => process.exit(0));
-      s.on("error",    e => process.exit((e.code==="ECONNREFUSED"||e.code==="EACCES"||e.code==="ECONNRESET") ? 0 : 1));
+      s.on("error",  e => process.exit((e.code==="ECONNREFUSED"||e.code==="EACCES"||e.code==="ECONNRESET") ? 0 : 1));
       s.on("timeout",  () => { s.destroy(); process.exit(1); });
     ' >/dev/null 2>&1
 }
@@ -289,13 +353,13 @@ if [ "$NO_NETWORK" = true ]; then
     fi
 fi
 
-# Run a pi session or bash shell.
+# Run an agent session or bash shell.
 if [ "$SHELL_MODE" = true ]; then
     echo "Opening bash shell inside $CONTAINER_NAME container"
     docker exec -it "$CONTAINER_NAME" bash
 else
-    echo "Starting a new pi session inside $CONTAINER_NAME container"
-    docker exec -it "$CONTAINER_NAME" pi
+    echo "Starting a new $AGENT_LABEL session inside $CONTAINER_NAME container"
+    docker exec -it "$CONTAINER_NAME" "$RUN_CMD"
 fi
 
 # Auto-stop container when only the sleep idle process remains.

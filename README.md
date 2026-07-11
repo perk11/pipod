@@ -1,13 +1,14 @@
-# pipod - Dockerized Pi Agent
+# pipod - Dockerized Coding Agents
 
 <p align="center">
 <img src="./logo.webp" width="194" alt="pipod Logo">
 </p>
 
-A Docker-based environment for running the [pi coding agent](https://github.com/earendil-works/pi) inside a persistent
-Docker container, one container per directory. The current directory is automatically mounted as `/workspace`.
-Internet access can optionally be turned off (except for reaching `host.docker.internal`, which lets local models keep
-working).
+A Docker-based environment for running a coding agent — either the
+[pi coding agent](https://github.com/earendil-works/pi) or
+[Claude Code](https://code.claude.com/) — inside a persistent Docker container, one container per directory (per
+agent). The current directory is automatically mounted as `/workspace`. Internet access can optionally be turned off
+(except for reaching `host.docker.internal`, which lets local models/gateways keep working).
 
 This isolates the agent from the host system, which makes the execution of custom code or shell commands significantly
 safer.
@@ -24,7 +25,8 @@ disallowing specific shell commands.
     ```bash
     alias pipod='/path/to/the/repo/pipod'
     ```
-   If you copy or symlink the script, the `Dockerfile` must be in the same directory.
+   If you copy or symlink the script, keep the `pi/` and `claude/` subdirectories next to it — each holds that
+   agent's `Dockerfile`, which the script builds from.
 4. Restart your shell or open a new terminal window.
 5. `cd` into a directory containing your project.
 6. (Optional) Run
@@ -38,12 +40,29 @@ disallowing specific shell commands.
     pipod
     ```
 
+## Running Claude Code
+
+To run [Claude Code](https://code.claude.com/) instead of pi, pass the `claude` command. Everything else works the same:
+
+```bash
+pipod claude          # start a Claude Code session
+pipod claude bash     # drop into a shell in the Claude container
+pipod claude -nn      # isolated, host-only network
+pipod claude -r       # force recreate the Claude container
+```
+
+Claude Code uses a **separate image** (`pipod-claude`) and **separate containers** (`pipod-claude-<slug>[-nonet]`),
+so pi and Claude side by side keep their own installed packages. Authentication is bootstrapped from your host's
+`~/.claude/.credentials.json` on first run (copied into the shared config tree), and persists across sessions;
+log in interactively inside the container once if it isn't already set up.
+
 ## How It Works
 
-Each workspace directory is assigned its own persistent Docker container named `pipod-<slug>[-nonet]`, where `<slug>`
-is derived from the workspace's absolute path. Starting another `pipod` instance reuses the existing container for the
-requested mode, so any installed packages persist between sessions. The container is automatically stopped (but kept
-on disk for reuse) once every session exits.
+Each workspace directory is assigned its own persistent Docker container, named `pipod-<slug>[-nonet]` for pi or
+`pipod-claude-<slug>[-nonet]` for Claude Code, where `<slug>` is derived from the workspace's absolute path. The two
+agents use separate images and separate containers, so they don't share installed packages. Starting another `pipod`
+instance reuses the existing container for the requested agent/mode, so any installed packages persist between
+sessions. The container is automatically stopped (but kept on disk for reuse) once every session exits.
 
 Current directory is mounted at `/workspace`.
 
@@ -64,6 +83,21 @@ To reference models running on `localhost`, use `host.docker.internal` as the ho
 | `/home/ubuntu/.pi/agent`          | `~/.pi/pipod/workspaces/<ws>/agent/`    | Per-workspace config override (if `agent/` dir exists) |
 | `/home/ubuntu/.pi/agent/sessions` | `~/.pi/pipod/workspaces/<ws>/sessions/` | Per-workspace sessions                                 |
 
+For Claude Code (`pipod claude`), the equivalent layout uses `CLAUDE_CONFIG_DIR` to relocate all of Claude's config
+(settings, skills, agents, plugins, and credentials) into the shared tree, while **session transcripts and memory are
+isolated per project**:
+
+| Path inside container               | Source on host                          | Purpose                                                        |
+|-------------------------------------|-----------------------------------------|----------------------------------------------------------------|
+| `/workspace`                        | Current working directory               | Project files                                                  |
+| `/home/ubuntu/.claude`              | `~/.pi/pipod/claude/`                   | Shared config (settings.json, CLAUDE.md, skills, `.credentials.json` auth) |
+| `/home/ubuntu/.claude`              | `~/.pi/pipod/workspaces/<ws>/claude/`   | Per-workspace config override (if `claude/` dir exists)        |
+| `/home/ubuntu/.claude/projects`     | `~/.pi/pipod/workspaces/<ws>/sessions/` | Per-project session transcripts & auto memory                  |
+
+> Claude Code's `~/.claude.json` (app state such as per-project trust/allowed-tool state) is not relocatable via
+> `CLAUDE_CONFIG_DIR`, so it is intentionally left in-container; authentication persists through the shared
+> `.credentials.json` under the mounted config directory.
+
 > **Permissions:** The host UID/GID are mapped directly into the container so that file permissions match your local
 > host user.
 
@@ -72,8 +106,9 @@ To reference models running on `localhost`, use `host.docker.internal` as the ho
 
 | Flag                  | Description                                                                                            |
 |-----------------------|--------------------------------------------------------------------------------------------------------|
+| `claude`              | Run the Claude Code agent instead of pi (separate image & container). Can combine with the flags below.|
 | `-r`, `--recreate`    | Force recreate the container (image rebuilt from cache); discards anything installed inside it         |
-| `--no-cache`          | Build the image without Docker cache (forces a `pi` upgrade)                                           |
+| `--no-cache`          | Build the image without Docker cache (forces an agent upgrade)                                         |
 | `-nn`, `--no-network` | Block internet access; only allow reaching the host (host.docker.internal). Uses a separate container. |
 | `-h`, `--help`        | Show the help message                                                                                  |
 | `bash`                | Open an interactive shell inside the container                                                         |
@@ -105,13 +140,20 @@ simple.
 
 I chose Ubuntu over Alpine to make it easier to run many different projects without compatibility surprises.
 
-`pi` is installed without version pinning, so the latest published version is fetched when an image is first built.
-Later invocations reuse the Docker cache and won't pick up newer versions automatically. To upgrade `pi` and other
-dependencies, either run `pi update` inside a `pipod bash` session, or rebuild the image from scratch with `-r`.  
+There are two images, each defined by its own `Dockerfile` in a subdirectory: `pi/Dockerfile` installs the
+`@earendil-works/pi-coding-agent` npm package, and `claude/Dockerfile` installs `@anthropic-ai/claude-code` (and
+`git`, which Claude Code's built-in commit/PR workflows rely on). The script builds the right one based on whether you
+pass `claude`.
+
+`pi`/`claude` are installed without version pinning, so the latest published version is fetched when an image is first
+built. Later invocations reuse the Docker cache and won't pick up newer versions automatically. To upgrade an agent
+and other dependencies, either run `pi update` / `claude update` inside a `pipod bash` (or `pipod claude bash`)
+session, or rebuild the image from scratch with `-r`.  
 Note that recreating a container discards any changes you made inside it.
 
 ```bash
-./pipod --no-cache -r
+./pipod --no-cache -r           # rebuild the pi image/container
+./pipod claude --no-cache -r    # rebuild the Claude Code image/container
 ```
 
 I've only tested this on Linux; it may or may not work on macOS.
