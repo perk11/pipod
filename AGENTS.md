@@ -17,17 +17,18 @@ version) into the image built from its own `Dockerfile` under `pi/`, `claude/`, 
 | `codex/Dockerfile`                            | Same base/user setup, plus `git` (no `fd`/`ripgrep` — Codex has built-in search); installs `@openai/codex` globally. Used when invoked as `pipod codex`.            |
 | `README.md`                                   | User-facing docs.                                                                                                                                          |
 
-> **All pipod state lives outside the repo**, at `~/.pi/pipod/` on the host (`$CONFIG_DIR` in the script). For pi it's
-> mounted into the container as `/home/ubuntu/.pi`; its `agent/{models,auth,settings}.json` hold pi's models, API keys,
-> and behavior, bootstrapped from the host's `~/.pi/agent/` on first run. For Claude Code the shared config lives under
-> `$CONFIG_DIR/claude/` and is mounted at `/home/ubuntu/.claude` (via `CLAUDE_CONFIG_DIR`); `.credentials.json` (auth)
-> and `settings.json` are bootstrapped from the host's `~/.claude/`. For Codex the shared config lives under
-> `$CONFIG_DIR/codex/` and is mounted at `/home/ubuntu/.codex` (via `CODEX_HOME`); `auth.json` (auth) and `config.toml`
-> are bootstrapped from the host's `~/.codex/`. Codex also writes mutable SQLite state DBs into `CODEX_HOME` by default,
-> which corrupts under concurrent projects, so `CODEX_SQLITE_HOME` relocates them to a per-workspace dir
-> (`$CONFIG_DIR/workspaces/<ws>/codex-state/`). Per-workspace state for all agents lives under
-> `~/.pi/pipod/workspaces/<ws>/` (`sessions/`, and optionally an `agent/` (pi), `claude/` (Claude), or `codex/` (Codex)
-> override).
+> **All pipod state lives outside the repo**, at `~/.pipod/` on the host (`$CONFIG_DIR` in the script). (On first run
+> after the upgrade from the pre-split `~/.pi/pipod/`, pipod moves that directory to `~/.pipod/` once.) For pi the
+> whole `$CONFIG_DIR` is mounted into the container as `/home/ubuntu/.pi`; its `agent/{models,auth,settings}.json`
+> hold pi's models, API keys, and behavior, bootstrapped from the host's `~/.pi/agent/` on first run. For Claude Code
+> the shared config lives under `$CONFIG_DIR/claude/` and is mounted at `/home/ubuntu/.claude` (via
+> `CLAUDE_CONFIG_DIR`); `.credentials.json` (auth) and `settings.json` are bootstrapped from the host's `~/.claude/`.
+> For Codex the shared config lives under `$CONFIG_DIR/codex/` and is mounted at `/home/ubuntu/.codex` (via
+> `CODEX_HOME`); `auth.json` (auth) and `config.toml` are bootstrapped from the host's `~/.codex/`. Per-workspace state
+> is split by agent under `$CONFIG_DIR/workspaces/<ws>/<agent>/` (`pi`/`claude`/`codex`): it holds that agent's
+> per-project data (`sessions/`, plus `state/` and `log/` for Codex and `file-history/` for Claude, all bind-mounted
+> over the shared agent home) and an optional `config/` override that replaces the shared agent config for that one
+> workspace.
 
 ## How `pipod` works
 
@@ -43,24 +44,34 @@ Most logic is agent-agnostic; the per-agent differences are captured in a block 
   is where the `pipod` script lives.
 - **Mounts** (set at `docker run`):
     - `$WORKSPACE_DIR` → `/workspace` (project files; also the work dir)
-    - pi: `$CONFIG_DIR` (`$HOME/.pi/pipod`) → `/home/ubuntu/.pi` (shared config). Claude: `$CONFIG_DIR/claude` →
-      `/home/ubuntu/.claude` (shared config: settings, CLAUDE.md, skills, agents, plugins, `.credentials.json`). Codex:
-      `$CONFIG_DIR/codex` → `/home/ubuntu/.codex` (shared config: `config.toml`, `AGENTS.md`, rules, `auth.json`).
-    - Per-workspace config override, only if the override dir exists: pi `$CONFIG_DIR/workspaces/<ws>/agent` →
-      `/home/ubuntu/.pi/agent`; Claude `$CONFIG_DIR/workspaces/<ws>/claude` → `/home/ubuntu/.claude`; Codex
-      `$CONFIG_DIR/workspaces/<ws>/codex` → `/home/ubuntu/.codex`.
-    - `$CONFIG_DIR/workspaces/<ws>/sessions` → per-workspace sessions: pi `/home/ubuntu/.pi/agent/sessions`; Claude
-      `/home/ubuntu/.claude/projects` (Claude's per-project transcripts & auto memory, isolated per workspace); Codex
-      `/home/ubuntu/.codex/sessions` (Codex's per-project session transcripts, isolated per workspace).
-    - Codex only: `$CONFIG_DIR/workspaces/<ws>/codex-state` → `/home/ubuntu/.codex/state` (per-workspace SQLite state
-      DBs — `state_5.sqlite`, `logs_2/goals_1/memories_1.sqlite` — relocated out of the shared `CODEX_HOME` via
-      `CODEX_SQLITE_HOME` so concurrent projects can't corrupt the WAL state).
+    - Shared config home (identical across every workspace): pi `$CONFIG_DIR` (`$HOME/.pipod`) → `/home/ubuntu/.pi`
+      (settings, models, auth, skills); Claude `$CONFIG_DIR/claude` → `/home/ubuntu/.claude` (settings, CLAUDE.md,
+      skills, agents, plugins, `.credentials.json`); Codex `$CONFIG_DIR/codex` → `/home/ubuntu/.codex` (`config.toml`,
+      `AGENTS.md`, rules, `auth.json`).
+    - Per-workspace **config override**, only if `workspaces/<ws>/<agent>/config` exists. For pi `…/pi/config` →
+      `/home/ubuntu/.pi/agent` (a sub-mount shadowing just the agent dir, alongside the shared `~/.pi`); for Claude
+      `…/claude/config` → `/home/ubuntu/.claude` and Codex `…/codex/config` → `/home/ubuntu/.codex` the override shares
+      the config mount's destination, so it is mounted **instead of** the shared config (two binds can't occupy one
+      path), wholesale-replacing it for that workspace.
+    - Per-workspace **data** (`workspaces/<ws>/<agent>/…`), bind-mounted over the matching path in the shared agent
+      home so each project keeps its own history (the in-container cwd is always `/workspace`, so without these
+      overlays all workspaces would share/clobber the same project state):
+        - pi `…/pi/sessions` → `/home/ubuntu/.pi/agent/sessions`.
+        - Claude `…/claude/sessions` → `/home/ubuntu/.claude/projects` (transcripts, auto memory, subagents,
+          tool-results); `…/claude/file-history` → `/home/ubuntu/.claude/file-history` (checkpoint snapshots);
+          `…/claude/history.jsonl` → `/home/ubuntu/.claude/history.jsonl` (prompt history).
+        - Codex `…/codex/sessions` → `/home/ubuntu/.codex/sessions` (rollout transcripts); `…/codex/state` →
+          `/home/ubuntu/.codex/state` (SQLite DBs `state_5.sqlite`, `logs_2/goals_1/memories_1.sqlite`, relocated out
+          of the shared `CODEX_HOME` via `CODEX_SQLITE_HOME` so concurrent projects can't corrupt the WAL state);
+          `…/codex/log` → `/home/ubuntu/.codex/log`; `…/codex/history.jsonl` → `/home/ubuntu/.codex/history.jsonl`.
+    - Auto-cleaned ephemera (shell-snapshots, paste/image caches, session-env, debug, plans, tasks) and Codex's
+      self-update package cache are intentionally left in the shared home: they are keyed by session UUID (never
+      collide across workspaces) and are transient.
 - **Env**: pi `PI_CODING_AGENT_DIR=/home/ubuntu/.pi/agent`; Claude `CLAUDE_CONFIG_DIR=/home/ubuntu/.claude`; Codex
-  `CODEX_HOME=/home/ubuntu/.codex`; Codex also sets `CODEX_SQLITE_HOME=/home/ubuntu/.codex/state`. Note Claude Code's
-  `~/.claude.json` (app state/per-project trust) is **not** relocatable via `CLAUDE_CONFIG_DIR` and is left in-container;
-  auth persists through the shared `.credentials.json` under the mounted config dir. Codex's `CODEX_HOME` relocates
-  everything (config, auth, sessions, state DBs); `CODEX_SQLITE_HOME` overrides just the SQLite state DB location to a
-  per-workspace dir so concurrent projects can't corrupt the WAL state.
+  `CODEX_HOME=/home/ubuntu/.codex` plus `CODEX_SQLITE_HOME=/home/ubuntu/.codex/state`. Claude Code's `~/.claude.json`
+  (app state/per-project trust) is **not** relocatable via `CLAUDE_CONFIG_DIR`; it lives in `$HOME` inside the
+  container, and since containers are per-workspace each workspace keeps its own (auth persists through the shared
+  `.credentials.json`).
 - **User**: runs as `ubuntu`, uid/gid remapped to the host user via `--build-arg HOST_UID`/`HOST_GID`, so files written
   in the container are owned by the host user.
 - **Reuse vs recreate**: `./pipod` reuses an existing container for the workspace/agent (`docker start` + `docker
@@ -79,13 +90,14 @@ Docker then recreates the missing bind sources as root on `docker start`, and th
 never ran.
 
 `pipod` therefore runs `prepare_config` on **every** invocation, before both `docker run` and `docker start`. It first
-`chown`s any root-owned subtree under `~/.pi/pipod` back to the invoking user (`recover_root_owned` scans the config root
+`chown`s any root-owned subtree under `~/.pipod` back to the invoking user (`recover_root_owned` scans the config root
 and `chown -R`s each root-owned entry it finds — covering both ancestors that would block `mkdir -p` and stale descendants
 from older mount layouts — via `sudo -n` if available, else exits with the exact command to run), then `mkdir -p`s the
-shared config dir (`~/.pi/pipod/agent` for pi, `~/.pi/pipod/claude` for Claude, `~/.pi/pipod/codex` for Codex) and the
-per-workspace `~/.pi/pipod/workspaces/<ws>/sessions` dir (plus `~/.pi/pipod/workspaces/<ws>/codex-state` for Codex's
-SQLite state), and bootstraps the agent's essential config (`models.json`/`auth.json` for pi;
-`.credentials.json`/`settings.json` for Claude; `auth.json`/`config.toml` for Codex) from the host if missing.
+shared config dir (`~/.pipod/agent` for pi, `~/.pipod/claude` for Claude, `~/.pipod/codex` for Codex) and that agent's
+per-workspace data dirs/files under `~/.pipod/workspaces/<ws>/<agent>/` (`sessions/` for all; `state/` + `log/` for
+Codex; `file-history/` for Claude; plus the `history.jsonl` file for Claude/Codex), and bootstraps the agent's essential
+config (`models.json`/`auth.json` for pi; `.credentials.json`/`settings.json` for Claude; `auth.json`/`config.toml` for
+Codex) from the host if missing.
 
 ## Commands
 
@@ -101,9 +113,9 @@ SQLite state), and bootstraps the agent's essential config (`models.json`/`auth.
 
 ## Conventions & guardrails
 
-- **All state is host-side**: both the shared config and the per-workspace `workspaces/` state live at
-  `~/.pi/pipod/` (outside the repo, never baked into the image; runtime bind-mounts). Don't rely on any of it being
-  baked into the image.
+- **All state is host-side**: both the shared config and the per-workspace `workspaces/` state live at `~/.pipod/`
+  (outside the repo, never baked into the image; runtime bind-mounts). Don't rely on any of it being baked into the
+  image.
 - **Don't break UID/GID mapping**: the `--build-arg HOST_UID`/`HOST_GID` + `USER ubuntu` setup is what makes host-owned
   files writable in the container. Preserve it.
 - **This repo wraps agents, it doesn't fork them**: behavior changes to pi, Claude Code, or Codex itself belong

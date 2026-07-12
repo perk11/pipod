@@ -70,13 +70,14 @@ pipod codex -r       # force recreate the Codex container
 ```
 
 Codex uses a **separate image** (`pipod-codex`) and **separate containers** (`pipod-codex-<slug>[-nonet]`), so each
-agent keeps its own installed packages. Codex relocates all of its state (config, auth, sessions, state DBs) via the
-`CODEX_HOME` environment variable. The home (`config.toml`, `auth.json`, skills) is **shared** across containers.
-Codex also writes mutable SQLite state DBs (`state_5.sqlite`, `logs_2/goals_1/memories_1.sqlite`) into the home by
-default, and sharing those across projects corrupts the WAL state (it wedges startup with `SQLITE_CANTOPEN`), so pipod
-sets `CODEX_SQLITE_HOME` to relocate them to a per-project dir (`~/.pi/pipod/workspaces/<ws>/codex-state/`).
-`config.toml` and `auth.json` are bootstrapped from your host's `~/.codex/`; if you sign in with a ChatGPT account or an
-API key, run `codex login` inside the container once if it isn't already set up.
+agent keeps its own installed packages. Codex relocates all of its state via the `CODEX_HOME` environment variable. The
+home (`config.toml`, `auth.json`, skills) is **shared** across containers, while the per-project data Codex writes
+during a run (session transcripts, logs, prompt history, and the mutable SQLite state DBs) is isolated per workspace
+under `~/.pipod/workspaces/<ws>/codex/`. Sharing the SQLite DBs (`state_5.sqlite`, `logs_2/goals_1/memories_1.sqlite`)
+across projects would corrupt the WAL state and wedge startup with `SQLITE_CANTOPEN`, so pipod points
+`CODEX_SQLITE_HOME` at the per-workspace `state/` dir. `config.toml` and `auth.json` are bootstrapped from your host's
+`~/.codex/`; if you sign in with a ChatGPT account or an API key, run `codex login` inside the container once if it
+isn't already set up.
 
 ## How It Works
 
@@ -89,47 +90,55 @@ sessions. The container is automatically stopped (but kept on disk for reuse) on
 
 Current directory is mounted at `/workspace`.
 
-Configuration is mounted from `~/.pi/pipod/` and is shared across all containers. If this directory does not
-exist, it will be bootstrapped from `~/.pi/agent/` during the first run.
+Configuration is mounted from `~/.pipod/` and is shared across all containers. If this directory does not exist, it
+will be bootstrapped from `~/.pi/agent/` during the first run. (On first run after upgrading from an older pipod, the
+previous `~/.pi/pipod/` state is moved to `~/.pipod/` once.)
 
-Per-workspace state (sessions, and optionally config overrides) is stored under `~/.pi/pipod/workspaces/`, organized by
-workspace path. Each workspace gets its own subdirectory containing a `sessions/` folder. If an `agent/` folder also
-exists inside a workspace subdirectory, it is used instead of the shared `~/.pi/pipod/agent/`, allowing per-workspace
-model, auth, skills, plugins or settings overrides.
+Per-workspace state is stored under `~/.pipod/workspaces/`, organized by workspace path **and split by agent** — each
+workspace gets a `pi/`, `claude/`, and `codex/` subdirectory holding that agent's per-project data (sessions and other
+session-scoped files, bind-mounted over the shared agent home so projects don't clobber each other) plus an optional
+`config/` override. If a `config/` folder exists for an agent, it replaces the shared agent config for that workspace,
+allowing per-workspace model, auth, skills, plugins or settings overrides.
 
 To reference models running on `localhost`, use `host.docker.internal` as the host.
 
-| Path inside container             | Source on host                          | Purpose                                                |
-|-----------------------------------|-----------------------------------------|--------------------------------------------------------|
-| `/workspace`                      | Current working directory               | Project files                                          |
-| `/home/ubuntu/.pi`                | `~/.pi/pipod/`                          | Shared config                                          |
-| `/home/ubuntu/.pi/agent`          | `~/.pi/pipod/workspaces/<ws>/agent/`    | Per-workspace config override (if `agent/` dir exists) |
-| `/home/ubuntu/.pi/agent/sessions` | `~/.pi/pipod/workspaces/<ws>/sessions/` | Per-workspace sessions                                 |
+| Path inside container             | Source on host                              | Purpose                                                |
+|-----------------------------------|---------------------------------------------|--------------------------------------------------------|
+| `/workspace`                      | Current working directory                   | Project files                                          |
+| `/home/ubuntu/.pi`                | `~/.pipod/`                                 | Shared config                                          |
+| `/home/ubuntu/.pi/agent`          | `~/.pipod/workspaces/<ws>/pi/config/`       | Per-workspace config override (if `config/` dir exists) |
+| `/home/ubuntu/.pi/agent/sessions` | `~/.pipod/workspaces/<ws>/pi/sessions/`     | Per-workspace sessions                                 |
 
-For Claude Code (`pipod claude`), the equivalent layout uses `CLAUDE_CONFIG_DIR` to relocate all of Claude's config
-(settings, skills, agents, plugins, and credentials) into the shared tree, while **session transcripts and memory are
-isolated per project**:
+For Claude Code (`pipod claude`), `CLAUDE_CONFIG_DIR` relocates all of Claude's config (settings, skills, agents,
+plugins, and credentials) into the shared tree, while the **per-project data Claude writes each session is isolated per
+workspace** (the in-container cwd is always `/workspace`, so every workspace would otherwise map to the same Claude
+project key and clobber each other):
 
-| Path inside container               | Source on host                          | Purpose                                                        |
-|-------------------------------------|-----------------------------------------|----------------------------------------------------------------|
-| `/workspace`                        | Current working directory               | Project files                                                  |
-| `/home/ubuntu/.claude`              | `~/.pi/pipod/claude/`                   | Shared config (settings.json, CLAUDE.md, skills, `.credentials.json` auth) |
-| `/home/ubuntu/.claude`              | `~/.pi/pipod/workspaces/<ws>/claude/`   | Per-workspace config override (if `claude/` dir exists)        |
-| `/home/ubuntu/.claude/projects`     | `~/.pi/pipod/workspaces/<ws>/sessions/` | Per-project session transcripts & auto memory                  |
+| Path inside container                | Source on host                                   | Purpose                                                          |
+|--------------------------------------|--------------------------------------------------|------------------------------------------------------------------|
+| `/workspace`                         | Current working directory                        | Project files                                                    |
+| `/home/ubuntu/.claude`               | `~/.pipod/claude/`                               | Shared config (settings.json, CLAUDE.md, skills, `.credentials.json` auth) |
+| `/home/ubuntu/.claude`               | `~/.pipod/workspaces/<ws>/claude/config/`        | Per-workspace config override (replaces the shared config row above when present) |
+| `/home/ubuntu/.claude/projects`      | `~/.pipod/workspaces/<ws>/claude/sessions/`      | Per-project session transcripts, memory, subagents, tool-results |
+| `/home/ubuntu/.claude/file-history`  | `~/.pipod/workspaces/<ws>/claude/file-history/`  | Per-project file snapshots (checkpoint/rewind)                   |
+| `/home/ubuntu/.claude/history.jsonl` | `~/.pipod/workspaces/<ws>/claude/history.jsonl`  | Per-project prompt history (up-arrow recall)                     |
 
 > Claude Code's `~/.claude.json` (app state such as per-project trust/allowed-tool state) is not relocatable via
-> `CLAUDE_CONFIG_DIR`, so it is intentionally left in-container; authentication persists through the shared
-> `.credentials.json` under the mounted config directory.
+> `CLAUDE_CONFIG_DIR`, so it stays in `$HOME` inside the container; since containers are per-workspace, each workspace
+> keeps its own. Authentication persists through the shared `.credentials.json` under the mounted config directory.
 
-For Codex (`pipod codex`), the `CODEX_HOME` config dir is **shared**, while the **SQLite state DBs and session
-transcripts are isolated per project**:
+For Codex (`pipod codex`), the `CODEX_HOME` config dir is **shared**, while the **per-project data Codex writes each
+session is isolated per workspace** (SQLite state DBs, session transcripts, logs, and prompt history):
 
-| Path inside container               | Source on host                             | Purpose                                                        |
-|-------------------------------------|--------------------------------------------|----------------------------------------------------------------|
-| `/workspace`                        | Current working directory                  | Project files                                                  |
-| `/home/ubuntu/.codex`               | `~/.pi/pipod/codex/`                       | Shared config (`config.toml`, `AGENTS.md`, rules, `auth.json` auth) |
-| `/home/ubuntu/.codex/sessions`      | `~/.pi/pipod/workspaces/<ws>/sessions/`    | Per-project session transcripts                                |
-| `/home/ubuntu/.codex/state`         | `~/.pi/pipod/workspaces/<ws>/codex-state/` | Per-project SQLite state DBs (`state_5.sqlite`, …), via `CODEX_SQLITE_HOME` |
+| Path inside container                | Source on host                                 | Purpose                                                          |
+|--------------------------------------|------------------------------------------------|------------------------------------------------------------------|
+| `/workspace`                         | Current working directory                      | Project files                                                    |
+| `/home/ubuntu/.codex`                | `~/.pipod/codex/`                              | Shared config (`config.toml`, `AGENTS.md`, rules, `auth.json` auth) |
+| `/home/ubuntu/.codex`                | `~/.pipod/workspaces/<ws>/codex/config/`       | Per-workspace config override (replaces the shared config row above when present) |
+| `/home/ubuntu/.codex/sessions`       | `~/.pipod/workspaces/<ws>/codex/sessions/`     | Per-project session transcripts                                  |
+| `/home/ubuntu/.codex/state`          | `~/.pipod/workspaces/<ws>/codex/state/`        | Per-project SQLite state DBs (`state_5.sqlite`, …), via `CODEX_SQLITE_HOME` |
+| `/home/ubuntu/.codex/log`            | `~/.pipod/workspaces/<ws>/codex/log/`          | Per-project logs                                                 |
+| `/home/ubuntu/.codex/history.jsonl`  | `~/.pipod/workspaces/<ws>/codex/history.jsonl` | Per-project prompt history                                       |
 
 > **Permissions:** The host UID/GID are mapped directly into the container so that file permissions match your local
 > host user.
