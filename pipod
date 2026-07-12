@@ -7,15 +7,18 @@ fi
 
 show_help() {
     cat <<'EOF'
-Usage: pipod [claude] [OPTIONS] [COMMAND]
+Usage: pipod [claude|codex] [OPTIONS] [COMMAND]
 
-Run the pi (or Claude Code) agent inside an isolated Docker container.
+Run the pi, Claude Code, or Codex agent inside an isolated Docker container.
 One persistent container is created per workspace directory, per agent.
 
 Commands:
   claude            Run the Claude Code agent instead of pi. This selects a
                     separate image and container (pipod-claude-...) and can be
                     combined with all options below, e.g. `pipod claude bash`.
+  codex             Run the OpenAI Codex CLI agent instead of pi. This selects a
+                    separate image and container (pipod-codex-...) and can be
+                    combined with all options below, e.g. `pipod codex bash`.
   bash              Open an interactive bash shell inside the container
 
 Options:
@@ -76,7 +79,8 @@ ensure_no_net_network() {
 # $dst_dir when missing, rewriting localhost/127.0.0.1 to host.docker.internal
 # so locally-served models/gateways stay reachable. For pi: models.json +
 # auth.json from ~/.pi/agent. For Claude Code: .credentials.json (auth) +
-# settings.json from ~/.claude. The file set and source dir are agent-specific
+# settings.json from ~/.claude. For Codex: auth.json (auth) + config.toml from
+# ~/.codex. The file set and source dir are agent-specific
 # (BOOTSTRAP_FILES / BOOTSTRAP_SRC_DIR).
 bootstrap_config() {
     local dst_dir="$1"
@@ -99,7 +103,9 @@ bootstrap_config() {
 # is recovered even when reusing a container.
 prepare_config() {
     recover_root_owned "$CONFIG_DIR"
-    mkdir -p "$SHARED_CONFIG_DIR" "$WS_DIR/sessions"
+    local dirs=("$SHARED_CONFIG_DIR" "$WS_DIR/sessions")
+    [ -n "$SQLITE_MOUNT_SRC" ] && dirs+=("$SQLITE_MOUNT_SRC")
+    mkdir -p "${dirs[@]}"
     bootstrap_config "$SHARED_CONFIG_DIR"
     if [ -d "$OVERRIDE_SRC" ]; then
         bootstrap_config "$OVERRIDE_SRC"
@@ -118,6 +124,7 @@ while [[ $# -gt 0 ]]; do
         --no-cache)   NO_CACHE=--no-cache; shift ;;
         -h|--help)    show_help; exit 0 ;;
         claude)       AGENT=claude; shift ;;
+        codex)        AGENT=codex; shift ;;
         bash)         SHELL_MODE=true; shift ;;
         *) echo "pipod: unknown option: $1" >&2; show_help >&2; exit 1 ;;
     esac
@@ -134,6 +141,12 @@ CONFIG_DIR="$HOME/.pi/pipod"
 WS_SLUG="${WORKSPACE_DIR//[^a-zA-Z0-9_-]/_}"
 WS_DIR="$CONFIG_DIR/workspaces/$WS_SLUG"
 
+# Optional per-agent mount (empty unless the agent sets it). Used for Codex's
+# per-workspace SQLite state (CODEX_SQLITE_HOME), nested under the shared
+# CODEX_HOME so the drift check's CONFIG_ROOT grep already covers it.
+SQLITE_MOUNT_SRC=""
+SQLITE_MOUNT_DEST=""
+
 # Agent-specific layout. Each agent gets its own image, container-name prefix,
 # Dockerfile subdir, and config mount; the per-workspace session overlay is the
 # "make sessions unique per project" knob.
@@ -146,11 +159,45 @@ WS_DIR="$CONFIG_DIR/workspaces/$WS_SLUG"
 #            agents, plugins and .credentials.json (auth). Per-project session
 #            transcripts and memory live under ~/.claude/projects, overlaid
 #            per workspace so each project's history is isolated.
+#   codex:   CODEX_HOME (~/.codex) is SHARED (config.toml, auth.json, skills are
+#            the same across every container), like pi/Claude. Codex also writes
+#            its mutable SQLite state DBs (state_5.sqlite, logs_2/goals_1/
+#            memories_1.sqlite) into CODEX_HOME by default; sharing those across
+#            projects corrupts the WAL state and wedges startup
+#            (SQLITE_CANTOPEN), so CODEX_SQLITE_HOME relocates them to a
+#            per-workspace bind mount (~/.codex/state, nested under the shared
+#            home like sessions). Session transcripts live under
+#            ~/.codex/sessions, also overlaid per workspace.
 #
 # Note: Claude Code's ~/.claude.json (app state, per-project trust) is not
 # relocatable via CLAUDE_CONFIG_DIR and is intentionally left in-container; auth
 # persists through the shared .credentials.json under the mounted config dir.
-if [ "$AGENT" = claude ]; then
+if [ "$AGENT" = codex ]; then
+    AGENT_LABEL="Codex CLI"
+    IMAGE_TAG="pipod-codex"
+    CONTAINER_PREFIX="pipod-codex"
+    BUILD_DIR="$PROJECT_DIR/codex"
+    # CODEX_HOME is shared (config.toml/auth.json/skills are identical across all
+    # containers). Codex stores its mutable SQLite state DBs (state_5.sqlite,
+    # logs_2/goals_1/memories_1.sqlite) next to config by default; sharing those
+    # across projects corrupts the WAL state and wedges startup with
+    # SQLITE_CANTOPEN. CODEX_SQLITE_HOME relocates them to a per-workspace bind
+    # mount (nested under CODEX_HOME like sessions), isolating the DBs per project
+    # while keeping config shared.
+    SHARED_CONFIG_DIR="$CONFIG_DIR/codex"
+    OVERRIDE_SRC="$WS_DIR/codex"
+    CONFIG_MOUNT_SRC="$CONFIG_DIR/codex"
+    CONFIG_MOUNT_DEST="/home/ubuntu/.codex"
+    OVERRIDE_DEST="/home/ubuntu/.codex"
+    SESSIONS_DEST="/home/ubuntu/.codex/sessions"
+    CONFIG_ROOT="/home/ubuntu/.codex"
+    SQLITE_MOUNT_SRC="$WS_DIR/codex-state"
+    SQLITE_MOUNT_DEST="/home/ubuntu/.codex/state"
+    AGENT_ENV=(-e "CODEX_HOME=/home/ubuntu/.codex" -e "CODEX_SQLITE_HOME=/home/ubuntu/.codex/state")
+    BOOTSTRAP_SRC_DIR="$HOME/.codex"
+    BOOTSTRAP_FILES=(auth.json config.toml)
+    RUN_CMD=codex
+elif [ "$AGENT" = claude ]; then
     AGENT_LABEL="Claude Code"
     IMAGE_TAG="pipod-claude"
     CONTAINER_PREFIX="pipod-claude"
@@ -162,7 +209,7 @@ if [ "$AGENT" = claude ]; then
     OVERRIDE_DEST="/home/ubuntu/.claude"
     SESSIONS_DEST="/home/ubuntu/.claude/projects"
     CONFIG_ROOT="/home/ubuntu/.claude"
-    AGENT_ENV_VAR="CLAUDE_CONFIG_DIR=/home/ubuntu/.claude"
+    AGENT_ENV=(-e "CLAUDE_CONFIG_DIR=/home/ubuntu/.claude")
     BOOTSTRAP_SRC_DIR="$HOME/.claude"
     BOOTSTRAP_FILES=(.credentials.json settings.json)
     RUN_CMD=claude
@@ -178,7 +225,7 @@ else
     OVERRIDE_DEST="/home/ubuntu/.pi/agent"
     SESSIONS_DEST="/home/ubuntu/.pi/agent/sessions"
     CONFIG_ROOT="/home/ubuntu/.pi"
-    AGENT_ENV_VAR="PI_CODING_AGENT_DIR=/home/ubuntu/.pi/agent"
+    AGENT_ENV=(-e "PI_CODING_AGENT_DIR=/home/ubuntu/.pi/agent")
     BOOTSTRAP_SRC_DIR="$HOME/.pi/agent"
     BOOTSTRAP_FILES=(models.json auth.json)
     RUN_CMD=pi
@@ -221,6 +268,7 @@ if [ -n "$EXISTING" ]; then
         printf '%s -> %s\n' "$CONFIG_MOUNT_SRC" "$CONFIG_MOUNT_DEST"
         [ -d "$OVERRIDE_SRC" ] && printf '%s -> %s\n' "$OVERRIDE_SRC" "$OVERRIDE_DEST"
         printf '%s -> %s\n' "$WS_DIR/sessions" "$SESSIONS_DEST"
+        [ -n "$SQLITE_MOUNT_SRC" ] && printf '%s -> %s\n' "$SQLITE_MOUNT_SRC" "$SQLITE_MOUNT_DEST"
     } | sort -u )
     # Escape CONFIG_ROOT for use as a literal in the grep ERE (dots only; the
     # mount destination lives under it, plus the /workspace mount).
@@ -259,6 +307,7 @@ if [ -z "$EXISTING" ]; then
         VOLUMES+=(-v "$OVERRIDE_SRC:$OVERRIDE_DEST")
     fi
     VOLUMES+=(-v "$WS_DIR/sessions:$SESSIONS_DEST")
+    [ -n "$SQLITE_MOUNT_SRC" ] && VOLUMES+=(-v "$SQLITE_MOUNT_SRC:$SQLITE_MOUNT_DEST")
 
     # --no-network: attach to the shared --internal network (egress blocked)
     # and point host.docker.internal at that network's on-link gateway so the
@@ -280,7 +329,7 @@ if [ -z "$EXISTING" ]; then
         --entrypoint sleep \
         "${ADD_HOST[@]}" \
         $NETWORK_OPT \
-        -e "$AGENT_ENV_VAR" \
+        "${AGENT_ENV[@]}" \
         "${VOLUMES[@]}" \
         -w /workspace \
         "$IMAGE_TAG" \

@@ -4,10 +4,11 @@
 <img src="./logo.webp" width="194" alt="pipod Logo">
 </p>
 
-A Docker-based environment for running a coding agent — either the
-[pi coding agent](https://github.com/earendil-works/pi) or
-[Claude Code](https://code.claude.com/) — inside a persistent Docker container, one container per directory (per
-agent). The current directory is automatically mounted as `/workspace`. Internet access can optionally be turned off
+A Docker-based environment for running a coding agent — the
+[pi coding agent](https://github.com/earendil-works/pi),
+[Claude Code](https://code.claude.com/), or [OpenAI Codex CLI](https://developers.openai.com/codex/cli) — inside a
+persistent Docker container, one container per directory (per agent). The current directory is automatically mounted
+as `/workspace`. Internet access can optionally be turned off
 (except for reaching `host.docker.internal`, which lets local models/gateways keep working).
 
 This isolates the agent from the host system, which makes the execution of custom code or shell commands significantly
@@ -25,8 +26,8 @@ disallowing specific shell commands.
     ```bash
     alias pipod='/path/to/the/repo/pipod'
     ```
-   If you copy or symlink the script, keep the `pi/` and `claude/` subdirectories next to it — each holds that
-   agent's `Dockerfile`, which the script builds from.
+   If you copy or symlink the script, keep the `pi/`, `claude/`, and `codex/` subdirectories next to it — each holds
+   that agent's `Dockerfile`, which the script builds from.
 4. Restart your shell or open a new terminal window.
 5. `cd` into a directory containing your project.
 6. (Optional) Run
@@ -56,11 +57,33 @@ so pi and Claude side by side keep their own installed packages. Authentication 
 `~/.claude/.credentials.json` on first run (copied into the shared config tree), and persists across sessions;
 log in interactively inside the container once if it isn't already set up.
 
+## Running Codex CLI
+
+To run the [OpenAI Codex CLI](https://developers.openai.com/codex/cli) instead of pi, pass the `codex` command.
+Everything else works the same:
+
+```bash
+pipod codex          # start a Codex session
+pipod codex bash     # drop into a shell in the Codex container
+pipod codex -nn      # isolated, host-only network
+pipod codex -r       # force recreate the Codex container
+```
+
+Codex uses a **separate image** (`pipod-codex`) and **separate containers** (`pipod-codex-<slug>[-nonet]`), so each
+agent keeps its own installed packages. Codex relocates all of its state (config, auth, sessions, state DBs) via the
+`CODEX_HOME` environment variable. The home (`config.toml`, `auth.json`, skills) is **shared** across containers.
+Codex also writes mutable SQLite state DBs (`state_5.sqlite`, `logs_2/goals_1/memories_1.sqlite`) into the home by
+default, and sharing those across projects corrupts the WAL state (it wedges startup with `SQLITE_CANTOPEN`), so pipod
+sets `CODEX_SQLITE_HOME` to relocate them to a per-project dir (`~/.pi/pipod/workspaces/<ws>/codex-state/`).
+`config.toml` and `auth.json` are bootstrapped from your host's `~/.codex/`; if you sign in with a ChatGPT account or an
+API key, run `codex login` inside the container once if it isn't already set up.
+
 ## How It Works
 
-Each workspace directory is assigned its own persistent Docker container, named `pipod-<slug>[-nonet]` for pi or
-`pipod-claude-<slug>[-nonet]` for Claude Code, where `<slug>` is derived from the workspace's absolute path. The two
-agents use separate images and separate containers, so they don't share installed packages. Starting another `pipod`
+Each workspace directory is assigned its own persistent Docker container, named `pipod-<slug>[-nonet]` for pi,
+`pipod-claude-<slug>[-nonet]` for Claude Code, or `pipod-codex-<slug>[-nonet]` for Codex, where `<slug>` is derived
+from the workspace's absolute path. The three agents use separate images and separate containers, so they don't share
+installed packages. Starting another `pipod`
 instance reuses the existing container for the requested agent/mode, so any installed packages persist between
 sessions. The container is automatically stopped (but kept on disk for reuse) once every session exits.
 
@@ -98,6 +121,16 @@ isolated per project**:
 > `CLAUDE_CONFIG_DIR`, so it is intentionally left in-container; authentication persists through the shared
 > `.credentials.json` under the mounted config directory.
 
+For Codex (`pipod codex`), the `CODEX_HOME` config dir is **shared**, while the **SQLite state DBs and session
+transcripts are isolated per project**:
+
+| Path inside container               | Source on host                             | Purpose                                                        |
+|-------------------------------------|--------------------------------------------|----------------------------------------------------------------|
+| `/workspace`                        | Current working directory                  | Project files                                                  |
+| `/home/ubuntu/.codex`               | `~/.pi/pipod/codex/`                       | Shared config (`config.toml`, `AGENTS.md`, rules, `auth.json` auth) |
+| `/home/ubuntu/.codex/sessions`      | `~/.pi/pipod/workspaces/<ws>/sessions/`    | Per-project session transcripts                                |
+| `/home/ubuntu/.codex/state`         | `~/.pi/pipod/workspaces/<ws>/codex-state/` | Per-project SQLite state DBs (`state_5.sqlite`, …), via `CODEX_SQLITE_HOME` |
+
 > **Permissions:** The host UID/GID are mapped directly into the container so that file permissions match your local
 > host user.
 
@@ -107,6 +140,7 @@ isolated per project**:
 | Flag                  | Description                                                                                            |
 |-----------------------|--------------------------------------------------------------------------------------------------------|
 | `claude`              | Run the Claude Code agent instead of pi (separate image & container). Can combine with the flags below.|
+| `codex`               | Run the OpenAI Codex CLI agent instead of pi (separate image & container). Can combine with the flags below.|
 | `-r`, `--recreate`    | Force recreate the container (image rebuilt from cache); discards anything installed inside it         |
 | `--no-cache`          | Build the image without Docker cache (forces an agent upgrade)                                         |
 | `-nn`, `--no-network` | Block internet access; only allow reaching the host (host.docker.internal). Uses a separate container. |
@@ -140,20 +174,21 @@ simple.
 
 I chose Ubuntu over Alpine to make it easier to run many different projects without compatibility surprises.
 
-There are two images, each defined by its own `Dockerfile` in a subdirectory: `pi/Dockerfile` installs the
-`@earendil-works/pi-coding-agent` npm package, and `claude/Dockerfile` installs `@anthropic-ai/claude-code` (and
-`git`, which Claude Code's built-in commit/PR workflows rely on). The script builds the right one based on whether you
-pass `claude`.
+There are three images, each defined by its own `Dockerfile` in a subdirectory: `pi/Dockerfile` installs the
+`@earendil-works/pi-coding-agent` npm package, `claude/Dockerfile` installs `@anthropic-ai/claude-code`, and
+`codex/Dockerfile` installs `@openai/codex` (the latter two also install `git`, which their built-in commit/PR
+workflows rely on). The script builds the right one based on whether you pass `claude` or `codex`.
 
-`pi`/`claude` are installed without version pinning, so the latest published version is fetched when an image is first
+`pi`/`claude`/`codex` are installed without version pinning, so the latest published version is fetched when an image is first
 built. Later invocations reuse the Docker cache and won't pick up newer versions automatically. To upgrade an agent
-and other dependencies, either run `pi update` / `claude update` inside a `pipod bash` (or `pipod claude bash`)
-session, or rebuild the image from scratch with `-r`.  
+and other dependencies, either run `pi update` / `claude update` / `codex update` inside a `pipod bash` (or
+`pipod claude bash` / `pipod codex bash`) session, or rebuild the image from scratch with `-r`.  
 Note that recreating a container discards any changes you made inside it.
 
 ```bash
 ./pipod --no-cache -r           # rebuild the pi image/container
 ./pipod claude --no-cache -r    # rebuild the Claude Code image/container
+./pipod codex --no-cache -r     # rebuild the Codex image/container
 ```
 
 I've only tested this on Linux; it may or may not work on macOS.
