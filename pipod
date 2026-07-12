@@ -263,12 +263,16 @@ confirm_recreate() {
 }
 
 if [ -n "$EXISTING" ]; then
+    # End with `true` so the brace group exits 0 even when the conditional
+    # `&& printf` lines short-circuit (OVERRIDE_SRC absent / SQLITE_MOUNT_SRC
+    # empty) — otherwise `set -euo pipefail` aborts the pipeline here.
     expected=$( {
         printf '%s -> /workspace\n' "$WORKSPACE_DIR"
         printf '%s -> %s\n' "$CONFIG_MOUNT_SRC" "$CONFIG_MOUNT_DEST"
         [ -d "$OVERRIDE_SRC" ] && printf '%s -> %s\n' "$OVERRIDE_SRC" "$OVERRIDE_DEST"
         printf '%s -> %s\n' "$WS_DIR/sessions" "$SESSIONS_DEST"
         [ -n "$SQLITE_MOUNT_SRC" ] && printf '%s -> %s\n' "$SQLITE_MOUNT_SRC" "$SQLITE_MOUNT_DEST"
+        true
     } | sort -u )
     # Escape CONFIG_ROOT for use as a literal in the grep ERE (dots only; the
     # mount destination lives under it, plus the /workspace mount).
