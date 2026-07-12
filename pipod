@@ -196,7 +196,7 @@ if [ "$AGENT" = codex ]; then
     AGENT_ENV=(-e "CODEX_HOME=/home/ubuntu/.codex" -e "CODEX_SQLITE_HOME=/home/ubuntu/.codex/state")
     BOOTSTRAP_SRC_DIR="$HOME/.codex"
     BOOTSTRAP_FILES=(auth.json config.toml)
-    RUN_CMD=codex
+    RUN_CMD=(codex --yolo)
 elif [ "$AGENT" = claude ]; then
     AGENT_LABEL="Claude Code"
     IMAGE_TAG="pipod-claude"
@@ -212,7 +212,7 @@ elif [ "$AGENT" = claude ]; then
     AGENT_ENV=(-e "CLAUDE_CONFIG_DIR=/home/ubuntu/.claude")
     BOOTSTRAP_SRC_DIR="$HOME/.claude"
     BOOTSTRAP_FILES=(.credentials.json settings.json)
-    RUN_CMD=claude
+    RUN_CMD=(claude)
 else
     AGENT_LABEL="pi"
     IMAGE_TAG="pipod-pi-coding-agent"
@@ -228,7 +228,7 @@ else
     AGENT_ENV=(-e "PI_CODING_AGENT_DIR=/home/ubuntu/.pi/agent")
     BOOTSTRAP_SRC_DIR="$HOME/.pi/agent"
     BOOTSTRAP_FILES=(models.json auth.json)
-    RUN_CMD=pi
+    RUN_CMD=(pi)
 fi
 
 CONTAINER_NAME="$CONTAINER_PREFIX-$WS_SLUG"
@@ -408,7 +408,7 @@ if [ "$SHELL_MODE" = true ]; then
     docker exec -it "$CONTAINER_NAME" bash
 else
     echo "Starting a new $AGENT_LABEL session inside $CONTAINER_NAME container"
-    docker exec -it "$CONTAINER_NAME" "$RUN_CMD"
+    docker exec -it "$CONTAINER_NAME" "${RUN_CMD[@]}"
 fi
 
 # Auto-stop container when only the sleep idle process remains.
