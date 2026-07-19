@@ -35,7 +35,7 @@ disallowing specific shell commands.
     pipod bash
     ```
    and install your project dependencies inside the container.
-7. Launch pipod:
+7. Launch pipod with `pi` coding agent:
 
     ```bash
     pipod
@@ -52,10 +52,10 @@ pipod claude -nn      # isolated, host-only network
 pipod claude -r       # force recreate the Claude container
 ```
 
-Claude Code uses a **separate image** (`pipod-claude`) and **separate containers** (`pipod-claude-<slug>[-nonet]`),
-so pi and Claude side by side keep their own installed packages. Authentication is bootstrapped from your host's
-`~/.claude/.credentials.json` on first run (copied into the shared config tree), and persists across sessions;
-log in interactively inside the container once if it isn't already set up.
+Claude Code's config (`CLAUDE_CONFIG_DIR`) is **shared** across containers while per-project session data is isolated
+per workspace — see [How It Works](#how-it-works). Authentication (`.credentials.json`) is bootstrapped from your
+host's `~/.claude/` on first run and persists across sessions; log in interactively inside the container once if it
+isn't already set up.
 
 ## Running Codex CLI
 
@@ -69,15 +69,9 @@ pipod codex -nn      # isolated, host-only network
 pipod codex -r       # force recreate the Codex container
 ```
 
-Codex uses a **separate image** (`pipod-codex`) and **separate containers** (`pipod-codex-<slug>[-nonet]`), so each
-agent keeps its own installed packages. Codex relocates all of its state via the `CODEX_HOME` environment variable. The
-home (`config.toml`, `auth.json`, skills) is **shared** across containers, while the per-project data Codex writes
-during a run (session transcripts, logs, prompt history, and the mutable SQLite state DBs) is isolated per workspace
-under `~/.pipod/workspaces/<ws>/codex/`. Sharing the SQLite DBs (`state_5.sqlite`, `logs_2/goals_1/memories_1.sqlite`)
-across projects would corrupt the WAL state and wedge startup with `SQLITE_CANTOPEN`, so pipod points
-`CODEX_SQLITE_HOME` at the per-workspace `state/` dir. `config.toml` and `auth.json` are bootstrapped from your host's
-`~/.codex/`; if you sign in with a ChatGPT account or an API key, run `codex login` inside the container once if it
-isn't already set up.
+Codex's config (`CODEX_HOME`) is **shared** across containers while per-project data is isolated per workspace — see
+[How It Works](#how-it-works). Authentication (`auth.json`) is bootstrapped from your host's `~/.codex/` on first
+run; run `codex login` inside the container once if it isn't already set up.
 
 ## How It Works
 
@@ -139,6 +133,10 @@ session is isolated per workspace** (SQLite state DBs, session transcripts, logs
 | `/home/ubuntu/.codex/state`          | `~/.pipod/workspaces/<ws>/codex/state/`        | Per-project SQLite state DBs (`state_5.sqlite`, …), via `CODEX_SQLITE_HOME` |
 | `/home/ubuntu/.codex/log`            | `~/.pipod/workspaces/<ws>/codex/log/`          | Per-project logs                                                 |
 | `/home/ubuntu/.codex/history.jsonl`  | `~/.pipod/workspaces/<ws>/codex/history.jsonl` | Per-project prompt history                                       |
+
+> Codex's mutable SQLite state DBs (`state_5.sqlite`, `logs_2/goals_1/memories_1.sqlite`) are relocated out of the
+> shared `CODEX_HOME` via `CODEX_SQLITE_HOME`, because sharing them across projects would corrupt their WAL state and
+> wedge startup with `SQLITE_CANTOPEN`.
 
 > **Permissions:** The host UID/GID are mapped directly into the container so that file permissions match your local
 > host user.
