@@ -151,10 +151,26 @@ session is isolated per workspace** (SQLite state DBs, session transcripts, logs
 | `-r`, `--recreate`    | Force recreate the container (image rebuilt from cache); discards anything installed inside it         |
 | `--no-cache`          | Build the image without Docker cache (forces an agent upgrade)                                         |
 | `-nn`, `--no-network` | Block internet access; only allow reaching the host (host.docker.internal). Uses a separate container. |
+| `--no-tty`            | Allocate stdin (`-i`) but no pseudo-tty (`-t`); for piping input or running the agent non-interactively.|
 | `-h`, `--help`        | Show the help message                                                                                  |
 | `bash`                | Open an interactive shell inside the container                                                         |
+| `stop`                | Stop the current workspace/agent container without removing it (it is reused next time). Honors the agent and `-nn`/`-r` selection, e.g. `pipod claude -nn stop`. |
+| `--`                  | End of pipod's own options. Everything after `--` is forwarded verbatim to the agent (or to `bash` in shell mode). |
 
 Flags can be combined, e.g. `pipod --no-cache -r -nn` rebuilds without cache and recreates the no-network container.
+
+```bash
+pipod stop                 # stop the pi container for this workspace
+pipod claude stop          # stop the Claude container
+pipod -nn stop             # stop the no-network container
+
+# Pass arguments through to the agent
+pipod -- --print "Summarize this codebase"      # runs `pi --print "..."`
+pipod claude -- --permission-mode plan          # runs `claude --permission-mode plan`
+
+# Non-interactive: pipe input without allocating a TTY
+pipod --no-tty -- --print "What files are here?" < /dev/null
+```
 
 ## Network Isolation (--no-network)
 
@@ -204,6 +220,25 @@ I've only tested this on Linux; it may or may not work on macOS.
 
 To clean up unused containers run `docker system prune`. You will lose any changes you made to the containers that are
 not running at the moment this command runs.
+
+## Tests
+
+The `pipod` script is covered by [bats-core](https://github.com/bats-core/bats-core) tests under `tests/`. They
+exercise the argument parser (`parse_args`), per-agent setup (`select_agent`), the `--help` output, the `stop`
+command, and end-to-end `--` argument forwarding through a mocked `docker` binary. The `package.json` for the suite
+lives under `tests/` too (not at the repo root) — it pins `bats` as a dev dependency so the tests are self-contained.
+
+```bash
+cd tests && npm install && npm test   # one-time install, then run every test
+# or, from the repo root:
+npm --prefix tests install
+npm --prefix tests test
+```
+
+The mock-docker suites (`tests/stop.bats`, `tests/exec.bats`) do **not** require Docker to be installed — they shim
+`docker` with `tests/docker-mock`. The unit tests under `tests/parse_args.bats` and `tests/select_agent.bats` source
+`pipod` directly (a source-guard skips the main flow when sourced). Add new behavior to `pipod` by extracting it into
+a small function next to `parse_args`/`select_agent` and adding a `.bats` file alongside the others.
 
 ## Limitations
 

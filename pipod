@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-if [ -w /proc/self/comm ]; then
-    echo pipod > /proc/self/comm || true
-fi
 
 show_help() {
     cat <<'EOF'
-Usage: pipod [claude|codex] [OPTIONS] [COMMAND]
+Usage: pipod [claude|codex] [OPTIONS] [COMMAND] [-- ARGS...]
 
 Run the pi, Claude Code, or Codex agent inside an isolated Docker container.
 One persistent container is created per workspace directory, per agent.
@@ -20,13 +15,20 @@ Commands:
                     separate image and container (pipod-codex-...) and can be
                     combined with all options below, e.g. `pipod codex bash`.
   bash              Open an interactive bash shell inside the container
+  stop              Stop the current workspace/agent container without removing it
+                    (it is reused next time)
 
 Options:
   -nn, --no-network Only allow access to the host (host.docker.internal), block the Internet.
                     Uses a separate container, so toggling -nn keeps each mode's installed packages.
   -r, --recreate    Force recreate the container (image is rebuilt from cache)
   --no-cache        Build the image without Docker cache (forces an agent upgrade)
+  --no-tty          Allocate stdin (-i) but no pseudo-tty; for piping input or running
+                    the agent non-interactively, e.g. `pipod --no-tty -- --print "..."`
   -h, --help        Show this help message and exit
+
+Anything after `--` is forwarded to the agent (or to bash in shell mode) as its
+own arguments, e.g. `pipod -- --print "summary"` runs `pi --print "summary"`.
 EOF
 }
 
@@ -118,23 +120,123 @@ prepare_config() {
     fi
 }
 
-RECREATE=false
-NO_CACHE=""
-SHELL_MODE=false
-NO_NETWORK=false
-AGENT=pi
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        -nn|--no-network) NO_NETWORK=true; shift ;;
-        -r|--recreate) RECREATE=true; shift ;;
-        --no-cache)   NO_CACHE=--no-cache; shift ;;
-        -h|--help)    show_help; exit 0 ;;
-        claude)       AGENT=claude; shift ;;
-        codex)        AGENT=codex; shift ;;
-        bash)         SHELL_MODE=true; shift ;;
-        *) echo "pipod: unknown option: $1" >&2; show_help >&2; exit 1 ;;
-    esac
-done
+# Parse pipod's own CLI args into module-level globals: AGENT, RECREATE,
+# NO_CACHE, SHELL_MODE, STOP_MODE, NO_NETWORK, NO_TTY, EXTRA_ARGS. Anything
+# after `--` is captured verbatim into EXTRA_ARGS for forwarding to the agent
+# (or to bash in shell mode), bypassing pipod's own flags. Extracted so the
+# parser is unit-testable.
+parse_args() {
+    RECREATE=false
+    NO_CACHE=""
+    SHELL_MODE=false
+    STOP_MODE=false
+    NO_NETWORK=false
+    NO_TTY=false
+    AGENT=pi
+    EXTRA_ARGS=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --)             shift; EXTRA_ARGS=("$@"); break ;;
+            -nn|--no-network) NO_NETWORK=true; shift ;;
+            -r|--recreate) RECREATE=true; shift ;;
+            --no-cache)   NO_CACHE=--no-cache; shift ;;
+            --no-tty)     NO_TTY=true; shift ;;
+            -h|--help)    show_help; exit 0 ;;
+            claude)       AGENT=claude; shift ;;
+            codex)        AGENT=codex; shift ;;
+            bash)         SHELL_MODE=true; shift ;;
+            stop)         STOP_MODE=true; shift ;;
+            *) echo "pipod: unknown option: $1" >&2; show_help >&2; exit 1 ;;
+        esac
+    done
+}
+
+# Set agent-specific globals (AGENT_LABEL, IMAGE_TAG, CONTAINER_PREFIX,
+# BUILD_DIR, mounts, env, BOOTSTRAP_*, RUN_CMD, …) based on $AGENT. Depends on
+# $PROJECT_DIR, $CONFIG_DIR, $WS_DIR, and $HOME being set by the caller —
+# extracted so the per-agent RUN_CMD is unit-testable. See the comment block
+# below (in the main flow, where this is called) for the full layout rationale.
+select_agent() {
+    if [ "$AGENT" = codex ]; then
+        AGENT_LABEL="Codex CLI"
+        IMAGE_TAG="pipod-codex"
+        CONTAINER_PREFIX="pipod-codex"
+        BUILD_DIR="$PROJECT_DIR/codex"
+        AGENT_KEY="codex"
+        WS_AGENT_DIR="$WS_DIR/$AGENT_KEY"
+        SHARED_CONFIG_DIR="$CONFIG_DIR/codex"
+        OVERRIDE_SRC="$WS_AGENT_DIR/config"
+        CONFIG_MOUNT_SRC="$CONFIG_DIR/codex"
+        CONFIG_MOUNT_DEST="/home/ubuntu/.codex"
+        OVERRIDE_DEST="/home/ubuntu/.codex"
+        CONFIG_ROOT="/home/ubuntu/.codex"
+        DATA_MOUNTS=(
+            "sessions|/home/ubuntu/.codex/sessions"
+            "state|/home/ubuntu/.codex/state"
+            "log|/home/ubuntu/.codex/log"
+        )
+        DATA_FILE_MOUNTS=("history.jsonl|/home/ubuntu/.codex/history.jsonl")
+        AGENT_ENV=(-e "CODEX_HOME=/home/ubuntu/.codex" -e "CODEX_SQLITE_HOME=/home/ubuntu/.codex/state")
+        BOOTSTRAP_SRC_DIR="$HOME/.codex"
+        BOOTSTRAP_FILES=(auth.json config.toml)
+        RUN_CMD=(codex --yolo)
+    elif [ "$AGENT" = claude ]; then
+        AGENT_LABEL="Claude Code"
+        IMAGE_TAG="pipod-claude"
+        CONTAINER_PREFIX="pipod-claude"
+        BUILD_DIR="$PROJECT_DIR/claude"
+        AGENT_KEY="claude"
+        WS_AGENT_DIR="$WS_DIR/$AGENT_KEY"
+        SHARED_CONFIG_DIR="$CONFIG_DIR/claude"
+        OVERRIDE_SRC="$WS_AGENT_DIR/config"
+        CONFIG_MOUNT_SRC="$CONFIG_DIR/claude"
+        CONFIG_MOUNT_DEST="/home/ubuntu/.claude"
+        OVERRIDE_DEST="/home/ubuntu/.claude"
+        CONFIG_ROOT="/home/ubuntu/.claude"
+        DATA_MOUNTS=(
+            "sessions|/home/ubuntu/.claude/projects"
+            "file-history|/home/ubuntu/.claude/file-history"
+        )
+        DATA_FILE_MOUNTS=("history.jsonl|/home/ubuntu/.claude/history.jsonl")
+        AGENT_ENV=(-e "CLAUDE_CONFIG_DIR=/home/ubuntu/.claude")
+        BOOTSTRAP_SRC_DIR="$HOME/.claude"
+        BOOTSTRAP_FILES=(.credentials.json settings.json)
+        RUN_CMD=(claude)
+    else
+        AGENT_LABEL="pi"
+        IMAGE_TAG="pipod-pi-coding-agent"
+        CONTAINER_PREFIX="pipod"
+        BUILD_DIR="$PROJECT_DIR/pi"
+        AGENT_KEY="pi"
+        WS_AGENT_DIR="$WS_DIR/$AGENT_KEY"
+        SHARED_CONFIG_DIR="$CONFIG_DIR/agent"
+        OVERRIDE_SRC="$WS_AGENT_DIR/config"
+        CONFIG_MOUNT_SRC="$CONFIG_DIR"
+        CONFIG_MOUNT_DEST="/home/ubuntu/.pi"
+        OVERRIDE_DEST="/home/ubuntu/.pi/agent"
+        CONFIG_ROOT="/home/ubuntu/.pi"
+        DATA_MOUNTS=("sessions|/home/ubuntu/.pi/agent/sessions")
+        DATA_FILE_MOUNTS=()
+        AGENT_ENV=(-e "PI_CODING_AGENT_DIR=/home/ubuntu/.pi/agent")
+        BOOTSTRAP_SRC_DIR="$HOME/.pi/agent"
+        BOOTSTRAP_FILES=(models.json auth.json)
+        RUN_CMD=(pi)
+    fi
+}
+
+# When sourced (e.g. by the test suite), expose the functions above without
+# enabling strict mode or running the main flow.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    return 0 2>/dev/null || true
+fi
+
+set -euo pipefail
+
+if [ -w /proc/self/comm ]; then
+    echo pipod > /proc/self/comm || true
+fi
+
+parse_args "$@"
 
 if ! command -v docker &>/dev/null; then
     echo "pipod: Docker is not installed (or not on PATH). Please install Docker and try again." >&2
@@ -185,71 +287,7 @@ WS_DIR="$CONFIG_DIR/workspaces/$WS_SLUG"
 # relocatable via CLAUDE_CONFIG_DIR. It lives in $HOME inside the container;
 # since containers are per-workspace (pipod-claude-<ws>), each workspace already
 # keeps its own, and auth persists through the shared .credentials.json.
-if [ "$AGENT" = codex ]; then
-    AGENT_LABEL="Codex CLI"
-    IMAGE_TAG="pipod-codex"
-    CONTAINER_PREFIX="pipod-codex"
-    BUILD_DIR="$PROJECT_DIR/codex"
-    AGENT_KEY="codex"
-    WS_AGENT_DIR="$WS_DIR/$AGENT_KEY"
-    SHARED_CONFIG_DIR="$CONFIG_DIR/codex"
-    OVERRIDE_SRC="$WS_AGENT_DIR/config"
-    CONFIG_MOUNT_SRC="$CONFIG_DIR/codex"
-    CONFIG_MOUNT_DEST="/home/ubuntu/.codex"
-    OVERRIDE_DEST="/home/ubuntu/.codex"
-    CONFIG_ROOT="/home/ubuntu/.codex"
-    DATA_MOUNTS=(
-        "sessions|/home/ubuntu/.codex/sessions"
-        "state|/home/ubuntu/.codex/state"
-        "log|/home/ubuntu/.codex/log"
-    )
-    DATA_FILE_MOUNTS=("history.jsonl|/home/ubuntu/.codex/history.jsonl")
-    AGENT_ENV=(-e "CODEX_HOME=/home/ubuntu/.codex" -e "CODEX_SQLITE_HOME=/home/ubuntu/.codex/state")
-    BOOTSTRAP_SRC_DIR="$HOME/.codex"
-    BOOTSTRAP_FILES=(auth.json config.toml)
-    RUN_CMD=(codex --yolo)
-elif [ "$AGENT" = claude ]; then
-    AGENT_LABEL="Claude Code"
-    IMAGE_TAG="pipod-claude"
-    CONTAINER_PREFIX="pipod-claude"
-    BUILD_DIR="$PROJECT_DIR/claude"
-    AGENT_KEY="claude"
-    WS_AGENT_DIR="$WS_DIR/$AGENT_KEY"
-    SHARED_CONFIG_DIR="$CONFIG_DIR/claude"
-    OVERRIDE_SRC="$WS_AGENT_DIR/config"
-    CONFIG_MOUNT_SRC="$CONFIG_DIR/claude"
-    CONFIG_MOUNT_DEST="/home/ubuntu/.claude"
-    OVERRIDE_DEST="/home/ubuntu/.claude"
-    CONFIG_ROOT="/home/ubuntu/.claude"
-    DATA_MOUNTS=(
-        "sessions|/home/ubuntu/.claude/projects"
-        "file-history|/home/ubuntu/.claude/file-history"
-    )
-    DATA_FILE_MOUNTS=("history.jsonl|/home/ubuntu/.claude/history.jsonl")
-    AGENT_ENV=(-e "CLAUDE_CONFIG_DIR=/home/ubuntu/.claude")
-    BOOTSTRAP_SRC_DIR="$HOME/.claude"
-    BOOTSTRAP_FILES=(.credentials.json settings.json)
-    RUN_CMD=(claude)
-else
-    AGENT_LABEL="pi"
-    IMAGE_TAG="pipod-pi-coding-agent"
-    CONTAINER_PREFIX="pipod"
-    BUILD_DIR="$PROJECT_DIR/pi"
-    AGENT_KEY="pi"
-    WS_AGENT_DIR="$WS_DIR/$AGENT_KEY"
-    SHARED_CONFIG_DIR="$CONFIG_DIR/agent"
-    OVERRIDE_SRC="$WS_AGENT_DIR/config"
-    CONFIG_MOUNT_SRC="$CONFIG_DIR"
-    CONFIG_MOUNT_DEST="/home/ubuntu/.pi"
-    OVERRIDE_DEST="/home/ubuntu/.pi/agent"
-    CONFIG_ROOT="/home/ubuntu/.pi"
-    DATA_MOUNTS=("sessions|/home/ubuntu/.pi/agent/sessions")
-    DATA_FILE_MOUNTS=()
-    AGENT_ENV=(-e "PI_CODING_AGENT_DIR=/home/ubuntu/.pi/agent")
-    BOOTSTRAP_SRC_DIR="$HOME/.pi/agent"
-    BOOTSTRAP_FILES=(models.json auth.json)
-    RUN_CMD=(pi)
-fi
+select_agent
 
 CONTAINER_NAME="$CONTAINER_PREFIX-$WS_SLUG"
 [ "$NO_NETWORK" = true ] && CONTAINER_NAME="${CONTAINER_NAME}-nonet"
@@ -258,6 +296,26 @@ CONTAINER_NAME="$CONTAINER_PREFIX-$WS_SLUG"
 # is pointed at this network's on-link gateway (NOT `host-gateway`, which
 # resolves to docker0 and would be off-subnet/unreachable here).
 NO_NET_NETWORK="pipod-no-net"
+
+# `stop` short-circuits before any build/create/recreate work: it kills the
+# workspace/agent container in place.
+if [ "$STOP_MODE" = true ]; then
+    STATUS=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "missing")
+    case "$STATUS" in
+        running|paused|created)
+            echo "Stopping $CONTAINER_NAME"
+            docker kill "$CONTAINER_NAME" >/dev/null 2>&1 || true
+            ;;
+        exited|dead)
+            echo "$CONTAINER_NAME is not running"
+            ;;
+        *)
+            echo "pipod: container $CONTAINER_NAME does not exist" >&2
+            exit 1
+            ;;
+    esac
+    exit 0
+fi
 
 # Remove existing container if -r.
 EXISTING=$(docker ps -aq -f name=^${CONTAINER_NAME}$)
@@ -442,13 +500,17 @@ if [ "$NO_NETWORK" = true ]; then
     fi
 fi
 
-# Run an agent session or bash shell.
+# Run an agent session or bash shell. `--no-tty` drops the `-t` (no pseudo-tty)
+# so stdin can be piped or the agent run non-interactively; EXTRA_ARGS (set by
+# `--`) is appended to the agent command — or to `bash` in shell mode.
+EXEC_FLAGS=(-it)
+[ "$NO_TTY" = true ] && EXEC_FLAGS=(-i)
 if [ "$SHELL_MODE" = true ]; then
     echo "Opening bash shell inside $CONTAINER_NAME container"
-    docker exec -it "$CONTAINER_NAME" bash
+    docker exec "${EXEC_FLAGS[@]}" "$CONTAINER_NAME" bash "${EXTRA_ARGS[@]}"
 else
     echo "Starting a new $AGENT_LABEL session inside $CONTAINER_NAME container"
-    docker exec -it "$CONTAINER_NAME" "${RUN_CMD[@]}"
+    docker exec "${EXEC_FLAGS[@]}" "$CONTAINER_NAME" "${RUN_CMD[@]}" "${EXTRA_ARGS[@]}"
 fi
 
 # Auto-stop container when only the sleep idle process remains.

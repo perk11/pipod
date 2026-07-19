@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# tests/docker-mock — a fake `docker` for integration tests. Logs every call
+# to $DOCKER_MOCK_LOG and replies to the small subset of subcommands pipod
+# uses during `stop`/`inspect`/`exec` flows.
+#
+# Behavior is controlled by env vars read at call time:
+#   DOCKER_MOCK_LOG     file to append "<subcmd> <args...>" lines to
+#   DOCKER_MOCK_STATE   "running" | "exited" | "paused" | "created" | "dead"
+#                       | "missing" (default; makes `inspect` exit 1)
+#   DOCKER_MOCK_TOP_N   number of lines `docker top` should report (default 1,
+#                       the idle sleep process — triggers auto-stop)
+#
+# Only the forms of each subcommand that pipod actually invokes are handled;
+# anything else is logged and exits 0 so unexpected calls surface in the log.
+
+LOG="${DOCKER_MOCK_LOG:-/dev/null}"
+STATE="${DOCKER_MOCK_STATE:-missing}"
+TOP_N="${DOCKER_MOCK_TOP_N:-1}"
+# When non-empty, `docker ps -aq -f name=...` returns this fake ID, making
+# pipod take the existing-container path (skip build/run) and reach `docker
+# exec` for agent-arg forwarding tests.
+PS_ID="${DOCKER_MOCK_PS_ID:-}"
+
+log() {
+    # NUL-separated args, separator BETWEEN (not after) so awk's NF reflects
+    # the real arg count (a trailing NUL would create a phantom empty field).
+    # Bash variables can't hold NUL, so emit it via printf's \0 escape.
+    {
+        printf '%s' "$1"
+        shift
+        local _arg
+        for _arg in "$@"; do
+            printf '\0%s' "$_arg"
+        done
+        printf '\n'
+    } >> "$LOG"
+}
+
+# All args joined by spaces; the leading token is the subcommand.
+subcmd="${1:-}"
+[ $# -gt 0 ] && shift
+log "$subcmd" "$@"
+
+case "$subcmd" in
+    inspect)
+        # `docker inspect -f '<template>' <name>` — handle the two templates
+        # pipod uses. .State.Status returns the configured state; the mount
+        # range template returns empty so drift detection sees `actual` empty
+        # and skips the recreate prompt.
+        if [ "${1:-}" = "-f" ]; then
+            case "${2:-}" in
+                "{{.State.Status}}")
+                    if [ "$STATE" = "missing" ]; then
+                        echo "Error: No such object: ${3:-}" >&2
+                        exit 1
+                    fi
+                    printf '%s' "$STATE"
+                    exit 0
+                    ;;
+                "{{range .Mounts}}"*)
+                    exit 0
+                    ;;
+            esac
+        fi
+        exit 1
+        ;;
+    kill|start|unpause|pause|rm)
+        exit 0
+        ;;
+    top)
+        # Mimic `docker top <name> -o pid` header + $TOP_N data rows.
+        printf 'PID\n'
+        i=0
+        while [ "$i" -lt "$TOP_N" ]; do
+            printf '%s\n' "$((1000 + i))"
+            i=$((i + 1))
+        done
+        exit 0
+        ;;
+    exec)
+        # Used by probe_internet/probe_host when NO_NETWORK is set; pretend the
+        # probe binary ran. (No probes run during `stop`, but we keep this for
+        # future end-to-end agent tests.)
+        exit 0
+        ;;
+    ps)
+        # `docker ps -aq -f name=^<name>$` — return the fake ID when set.
+        if [ -n "$PS_ID" ]; then
+            printf '%s\n' "$PS_ID"
+        fi
+        exit 0
+        ;;
+    build|run|network)
+        exit 0
+        ;;
+    "")
+        # `docker` with no subcommand — `command -v docker` only checks the
+        # binary exists, it doesn't run it, but be safe.
+        exit 0
+        ;;
+    *)
+        # Unknown subcommand: succeed but log, so a test asserting "no extra
+        # docker calls" can spot it.
+        exit 0
+        ;;
+esac

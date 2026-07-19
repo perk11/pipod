@@ -1,0 +1,12 @@
+{
+  "name": "pipod-tests",
+  "version": "0.0.0",
+  "description": "bats-core test suite for the pipod script.",
+  "private": true,
+  "scripts": {
+    "test": "bats ."
+  },
+  "devDependencies": {
+    "bats": "^1.13.0"
+  }
+}

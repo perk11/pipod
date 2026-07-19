@@ -16,6 +16,7 @@ version) into the image built from its own `Dockerfile` under `pi/`, `claude/`, 
 | `claude/Dockerfile`                           | Same base/user setup, plus `git`; installs `@anthropic-ai/claude-code` globally. Used when invoked as `pipod claude`.                                      |
 | `codex/Dockerfile`                            | Same base/user setup, plus `git` (no `fd`/`ripgrep` — Codex has built-in search); installs `@openai/codex` globally. Used when invoked as `pipod codex`.            |
 | `README.md`                                   | User-facing docs.                                                                                                                                          |
+| `tests/`                                      | bats-core test suite (run from this dir via `npm install && npm test`, or `npm --prefix tests test` from the repo root). `package.json` here pins `bats` as a dev dependency; `test_helper.bash` sources `pipod` (a source-guard skips the main flow when sourced); `parse_args.bats`/`select_agent.bats` unit-test those functions; `help.bats` checks the `--help` output; `stop.bats`/`exec.bats` run pipod end-to-end against `docker-mock` (no Docker needed). |
 
 > **All pipod state lives outside the repo**, at `~/.pipod/` on the host (`$CONFIG_DIR` in the script). (On first run
 > after the upgrade from the pre-split `~/.pi/pipod/`, pipod moves that directory to `~/.pipod/` once.) For pi the
