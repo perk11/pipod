@@ -6,7 +6,8 @@
 
 A Docker-based environment for running a coding agent — the
 [pi coding agent](https://github.com/earendil-works/pi),
-[Claude Code](https://code.claude.com/), or [OpenAI Codex CLI](https://developers.openai.com/codex/cli) — inside a
+[Claude Code](https://code.claude.com/), [OpenAI Codex CLI](https://developers.openai.com/codex/cli), or
+[JetBrains Junie CLI](https://junie.jetbrains.com/) — inside a
 persistent Docker container, one container per directory (per agent). The current directory is automatically mounted
 as `/workspace`. Internet access can optionally be turned off
 (except for reaching `host.docker.internal`, which lets local models/gateways keep working).
@@ -26,7 +27,7 @@ disallowing specific shell commands.
     ```bash
     alias pipod='/path/to/the/repo/pipod'
     ```
-   If you copy or symlink the script, keep the `pi/`, `claude/`, and `codex/` subdirectories next to it — each holds
+   If you copy or symlink the script, keep the `pi/`, `claude/`, `codex/`, and `junie/` subdirectories next to it — each holds
    that agent's `Dockerfile`, which the script builds from.
 4. Restart your shell or open a new terminal window.
 5. `cd` into a directory containing your project.
@@ -73,12 +74,68 @@ Codex's config (`CODEX_HOME`) is **shared** across containers while per-project 
 [How It Works](#how-it-works). Authentication (`auth.json`) is bootstrapped from your host's `~/.codex/` on first
 run; run `codex login` inside the container once if it isn't already set up.
 
+## Running Junie CLI
+
+To run the [JetBrains Junie CLI](https://junie.jetbrains.com/) instead of pi, pass the `junie` command.
+Everything else works the same:
+
+```bash
+pipod junie          # start a Junie session
+pipod junie bash     # drop into a shell in the Junie container
+pipod junie -nn      # isolated, host-only network
+pipod junie -r       # force recreate the Junie container
+```
+
+Junie's config home is the fixed `~/.junie` directory (it has no config-dir environment variable to relocate it, so
+pipod mounts the shared config there directly). It is **shared** across containers while per-project data is isolated
+per workspace — see [How It Works](#how-it-works). On first run pipod bootstraps, from your host's `~/.junie/`:
+
+- **Files:** `config.json` (base settings like `model`/`provider`/`flags`), `settings.json` (user/TUI settings, which
+  Junie resolves at *higher* precedence than `config.json`), `allowlist.json` (the action allowlist), and
+  `secure_credentials.json` (Junie's credential store — see auth below).
+- **Directories:** `models/` (custom model profiles, which embed their own BYOK key/base URL — e.g. `models/glm.json`
+  is used as `custom:glm`), `mcp/` (MCP servers), `skills/`, `commands/` (custom slash commands), and `agents/`
+  (custom agents).
+
+Each file is copied only if missing, with `localhost`/`127.0.0.1` rewritten to `host.docker.internal` so a model or MCP
+endpoint served on your host stays reachable.
+
+### Authentication
+
+Junie's activation gate needs a JetBrains-Account credential, independent of your model profile (a `custom:` model's
+own `apiKey` routes the LLM call but does **not** satisfy the gate). On your **host** this is usually already in place
+with **no separate Junie login**: if you're signed into a JetBrains IDE or Toolbox, Junie reuses that sign-in.
+
+That credential is stored in `~/.junie/secure_credentials.json`, which pipod bootstraps from your host on first run
+and bind-mounts live thereafter — so **it carries across automatically**: sign in once on the host (directly, or via
+the IDE/Toolbox) and every container is already authenticated, with no in-container login needed.
+
+The exception is hosts where Junie keeps the credential in the **OS keyring** instead of the file (macOS Keychain,
+Windows Credential Manager, or a Linux keyring Junie prefers): there's no file to copy, so the container starts
+unauthenticated — then run `pipod junie` once and complete the login. Junie writes the result to the shared
+`~/.junie/secure_credentials.json`, authenticating every later run, workspace container, and `pipod junie -r` recreation.
+
+Other ways to satisfy the gate:
+
+- a **Junie API key** (token from <https://junie.jetbrains.com/cli>): `pipod junie -- --auth perm-…`, or
+  `export JUNIE_API_KEY=…` inside the container;
+- for a **built-in-provider** model only, the provider key in `config.json`'s `byok` (a file pipod bootstraps):
+  ```json
+  { "model": "sonnet", "provider": "anthropic", "byok": { "anthropic": "sk-ant-..." } }
+  ```
+
+Note that the `@jetbrains/junie` npm package is a small launcher: its postinstall downloads the platform binary under
+`~/.local/share/junie` during image build, and the image build also runs `junie update` once to pre-download the
+latest release (the npm package is version-pinned and otherwise lags behind, so each container would self-update and
+re-download the full binary on first run). Junie's auto-update stays enabled, so it still picks up newer releases at
+runtime — this only bakes in the initial gap. Upgrading Junie uses `junie update` rather than `npm`.
+
 ## How It Works
 
 Each workspace directory is assigned its own persistent Docker container, named `pipod-<slug>[-nonet]` for pi,
-`pipod-claude-<slug>[-nonet]` for Claude Code, or `pipod-codex-<slug>[-nonet]` for Codex, where `<slug>` is derived
-from the workspace's absolute path. The three agents use separate images and separate containers, so they don't share
-installed packages. Starting another `pipod`
+`pipod-claude-<slug>[-nonet]` for Claude Code, `pipod-codex-<slug>[-nonet]` for Codex, or
+`pipod-junie-<slug>[-nonet]` for Junie, where `<slug>` is derived from the workspace's absolute path. The four agents
+use separate images and separate containers, so they don't share installed packages. Starting another `pipod`
 instance reuses the existing container for the requested agent/mode, so any installed packages persist between
 sessions. The container is automatically stopped (but kept on disk for reuse) once every session exits.
 
@@ -89,7 +146,7 @@ will be bootstrapped from `~/.pi/agent/` during the first run. (On first run aft
 previous `~/.pi/pipod/` state is moved to `~/.pipod/` once.)
 
 Per-workspace state is stored under `~/.pipod/workspaces/`, organized by workspace path **and split by agent** — each
-workspace gets a `pi/`, `claude/`, and `codex/` subdirectory holding that agent's per-project data (sessions and other
+workspace gets a `pi/`, `claude/`, `codex/`, and `junie/` subdirectory holding that agent's per-project data (sessions and other
 session-scoped files, bind-mounted over the shared agent home so projects don't clobber each other) plus an optional
 `config/` override. If a `config/` folder exists for an agent, it replaces the shared agent config for that workspace,
 allowing per-workspace model, auth, skills, plugins or settings overrides.
@@ -138,6 +195,20 @@ session is isolated per workspace** (SQLite state DBs, session transcripts, logs
 > shared `CODEX_HOME` via `CODEX_SQLITE_HOME`, because sharing them across projects would corrupt their WAL state and
 > wedge startup with `SQLITE_CANTOPEN`.
 
+For Junie (`pipod junie`), Junie has **no config-dir environment variable**, so its fixed `~/.junie` home is mounted
+in place (the container's `$HOME` is `/home/ubuntu`, so this is `/home/ubuntu/.junie`). Config is **shared** while the
+**per-project data Junie writes each session is isolated per workspace** (per-task transcripts and logs). The platform
+binary itself lives under `~/.local/share/junie`, baked into the image (per-container, like the other agents' npm
+packages), so it is not bind-mounted:
+
+| Path inside container                          | Source on host                                          | Purpose                                                          |
+|------------------------------------------------|--------------------------------------------------------|------------------------------------------------------------------|
+| `/workspace`                                   | Current working directory                              | Project files                                                    |
+| `/home/ubuntu/.junie`                          | `~/.pipod/junie/`                                      | Shared config (`config.json`, `settings.json`, `allowlist.json`, `secure_credentials.json`; `/account` keys live in the OS keyring — see above) |
+| `/home/ubuntu/.junie`                          | `~/.pipod/workspaces/<ws>/junie/config/`               | Per-workspace config override (replaces the shared config row above when present) |
+| `/home/ubuntu/.junie/cli-sessions/sessions`    | `~/.pipod/workspaces/<ws>/junie/sessions/`             | Per-project per-task transcripts (`events.jsonl`, `transcript.md`, `subagents/`) |
+| `/home/ubuntu/.junie/logs`                     | `~/.pipod/workspaces/<ws>/junie/log/`                  | Per-project app + upgrade logs                                   |
+
 > **Permissions:** The host UID/GID are mapped directly into the container so that file permissions match your local
 > host user.
 
@@ -148,6 +219,7 @@ session is isolated per workspace** (SQLite state DBs, session transcripts, logs
 |-----------------------|--------------------------------------------------------------------------------------------------------|
 | `claude`              | Run the Claude Code agent instead of pi (separate image & container). Can combine with the flags below.|
 | `codex`               | Run the OpenAI Codex CLI agent instead of pi (separate image & container). Can combine with the flags below.|
+| `junie`               | Run the JetBrains Junie CLI agent instead of pi (separate image & container). Can combine with the flags below.|
 | `-r`, `--recreate`    | Force recreate the container (image rebuilt from cache); discards anything installed inside it         |
 | `--no-cache`          | Build the image without Docker cache (forces an agent upgrade)                                         |
 | `-nn`, `--no-network` | Block internet access; only allow reaching the host (host.docker.internal). Uses a separate container. |
@@ -162,6 +234,8 @@ Flags can be combined, e.g. `pipod --no-cache -r -nn` rebuilds without cache and
 ```bash
 pipod stop                 # stop the pi container for this workspace
 pipod claude stop          # stop the Claude container
+pipod codex stop           # stop the Codex container
+pipod junie stop           # stop the Junie container
 pipod -nn stop             # stop the no-network container
 
 # Pass arguments through to the agent
@@ -197,21 +271,27 @@ simple.
 
 I chose Ubuntu over Alpine to make it easier to run many different projects without compatibility surprises.
 
-There are three images, each defined by its own `Dockerfile` in a subdirectory: `pi/Dockerfile` installs the
-`@earendil-works/pi-coding-agent` npm package, `claude/Dockerfile` installs `@anthropic-ai/claude-code`, and
-`codex/Dockerfile` installs `@openai/codex` (the latter two also install `git`, which their built-in commit/PR
-workflows rely on). The script builds the right one based on whether you pass `claude` or `codex`.
+There are four images, each defined by its own `Dockerfile` in a subdirectory: `pi/Dockerfile` installs the
+`@earendil-works/pi-coding-agent` npm package, `claude/Dockerfile` installs `@anthropic-ai/claude-code`,
+`codex/Dockerfile` installs `@openai/codex`, and `junie/Dockerfile` installs `@jetbrains/junie` (the latter three also
+install `git`, which their built-in commit/PR/review workflows rely on; the Junie image additionally installs
+`curl` and `unzip` for the launcher's download/self-update mechanism). The script builds the right one based on
+whether you pass `claude`, `codex`, or `junie`.
 
 `pi`/`claude`/`codex` are installed without version pinning, so the latest published version is fetched when an image is first
-built. Later invocations reuse the Docker cache and won't pick up newer versions automatically. To upgrade an agent
-and other dependencies, either run `pi update` / `claude update` / `codex update` inside a `pipod bash` (or
-`pipod claude bash` / `pipod codex bash`) session, or rebuild the image from scratch with `-r`.  
+built. `@jetbrains/junie` is likewise installed unpinned; its postinstall downloads the matching platform binary, and
+the build then runs `junie update` once to pre-download the latest release (the npm package's pinned build otherwise
+lags behind, so each container would re-download the full binary on first run). Later invocations reuse the Docker
+cache and won't pick up newer versions automatically. To upgrade an agent
+and other dependencies, either run `pi update` / `claude update` / `codex update` / `junie update` inside a `pipod bash` (or
+`pipod claude bash` / `pipod codex bash` / `pipod junie bash`) session, or rebuild the image from scratch with `-r`.  
 Note that recreating a container discards any changes you made inside it.
 
 ```bash
 ./pipod --no-cache -r           # rebuild the pi image/container
 ./pipod claude --no-cache -r    # rebuild the Claude Code image/container
 ./pipod codex --no-cache -r     # rebuild the Codex image/container
+./pipod junie --no-cache -r     # rebuild the Junie image/container
 ```
 
 I've only tested this on Linux; it may or may not work on macOS.

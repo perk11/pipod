@@ -31,7 +31,13 @@ load test_helper
 
 @test "help usage line mentions the new [-- ARGS...] form" {
     run "$PIPOD" --help
-    [[ "$output" == *"Usage: pipod [claude|codex] [OPTIONS] [COMMAND] [-- ARGS...]"* ]]
+    [[ "$output" == *"Usage: pipod [claude|codex|junie] [OPTIONS] [COMMAND] [-- ARGS...]"* ]]
+}
+
+@test "help lists the junie command" {
+    run "$PIPOD" --help
+    [[ "$output" == *"  junie"* ]]
+    [[ "$output" == *"JetBrains Junie CLI agent"* ]]
 }
 
 @test "-h is an alias for --help" {

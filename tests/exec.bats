@@ -90,6 +90,14 @@ exec_argc() {
     [ "$(exec_field 6)" = "plan" ]
 }
 
+@test "-- forwards args to junie (plain RUN_CMD, no default flags)" {
+    run_pipod junie -- --plan
+    [ "$status" -eq 0 ]
+    [ "$(exec_field 4)" = "junie" ]
+    [ "$(exec_field 5)" = "--plan" ]
+    [ "$(exec_argc)" = "5" ]
+}
+
 @test "bash shell mode: extra args go to bash after the name" {
     run_pipod bash -- -c "echo hi"
     [ "$status" -eq 0 ]
@@ -115,4 +123,10 @@ exec_argc() {
     run_pipod claude -nn -- foo
     [ "$status" -eq 0 ]
     [[ "$(exec_field 3)" == pipod-claude-*-nonet ]]
+}
+
+@test "junie container name uses the pipod-junie- prefix" {
+    run_pipod junie -- task
+    [ "$status" -eq 0 ]
+    [[ "$(exec_field 3)" == pipod-junie-* ]]
 }

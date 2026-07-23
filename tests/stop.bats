@@ -101,6 +101,14 @@ docker_calls() {
     awk -F'\0' '$1=="kill"{print $2}' "$DOCKER_LOG" | grep -qE '^pipod-codex-'
 }
 
+@test "stop targets the junie container when invoked with 'junie stop'" {
+    DOCKER_MOCK_STATE=running
+    export DOCKER_MOCK_STATE
+    run_pipod junie stop
+    [ "$status" -eq 0 ]
+    awk -F'\0' '$1=="kill"{print $2}' "$DOCKER_LOG" | grep -qE '^pipod-junie-'
+}
+
 @test "stop with -nn targets the no-network container (name ends in -nonet)" {
     DOCKER_MOCK_STATE=running
     export DOCKER_MOCK_STATE

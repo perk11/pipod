@@ -33,6 +33,11 @@ parse() {
     [ "$AGENT" = codex ]
 }
 
+@test "junie selects the junie agent" {
+    parse junie
+    [ "$AGENT" = junie ]
+}
+
 @test "bash enables shell mode" {
     parse bash
     [ "$SHELL_MODE" = true ]
@@ -130,6 +135,8 @@ parse() {
 @test "later agent command wins when both are given" {
     parse claude codex
     [ "$AGENT" = codex ]
+    parse codex junie
+    [ "$AGENT" = junie ]
 }
 
 @test "parse_args can be called repeatedly without state leaking" {

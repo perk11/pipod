@@ -2,10 +2,11 @@
 
 show_help() {
     cat <<'EOF'
-Usage: pipod [claude|codex] [OPTIONS] [COMMAND] [-- ARGS...]
+Usage: pipod [claude|codex|junie] [OPTIONS] [COMMAND] [-- ARGS...]
 
-Run the pi, Claude Code, or Codex agent inside an isolated Docker container.
-One persistent container is created per workspace directory, per agent.
+Run the pi, Claude Code, Codex, or Junie agent inside an isolated Docker
+container. One persistent container is created per workspace directory, per
+agent.
 
 Commands:
   claude            Run the Claude Code agent instead of pi. This selects a
@@ -14,6 +15,9 @@ Commands:
   codex             Run the OpenAI Codex CLI agent instead of pi. This selects a
                     separate image and container (pipod-codex-...) and can be
                     combined with all options below, e.g. `pipod codex bash`.
+  junie             Run the JetBrains Junie CLI agent instead of pi. This selects
+                    a separate image and container (pipod-junie-...) and can be
+                    combined with all options below, e.g. `pipod junie bash`.
   bash              Open an interactive bash shell inside the container
   stop              Stop the current workspace/agent container without removing it
                     (it is reused next time)
@@ -77,12 +81,26 @@ ensure_no_net_network() {
     docker network create --internal "$net" >/dev/null
 }
 
-# Copy essential config (auth + base settings) from the host's agent dir into
-# $dst_dir when missing, rewriting localhost/127.0.0.1 to host.docker.internal
-# so locally-served models/gateways stay reachable. For pi: models.json +
-# auth.json from ~/.pi/agent. For Claude Code: .credentials.json (auth) +
-# settings.json from ~/.claude. For Codex: auth.json (auth) + config.toml from
-# ~/.codex. The file set and source dir are agent-specific
+# Copy essential config from the host's agent dir into $dst_dir when missing,
+# rewriting localhost/127.0.0.1 to host.docker.internal so locally-served
+# models/gateways stay reachable. For pi: models.json + auth.json from
+# ~/.pi/agent. For Claude Code: .credentials.json (auth) + settings.json from
+# ~/.claude. For Codex: auth.json (auth) + config.toml from ~/.codex. For
+# Junie: config.json (base settings + BYOK provider keys), settings.json (user
+# settings, which Junie resolves at HIGHER precedence than config.json),
+# allowlist.json (action allowlist), and secure_credentials.json (Junie's
+# credential store) from ~/.junie. Junie's activation gate needs a
+# JetBrains-Account credential (independent of the model profile); on the host
+# it's usually in place with no separate login (reused from a JetBrains
+# IDE/Toolbox sign-in). That credential lives in secure_credentials.json — which
+# IS bootstrapped/mounted here, so it carries across automatically (no
+# in-container login). The exception is hosts where Junie keeps the credential
+# in the OS keyring instead (macOS Keychain / Windows Credential Manager / a
+# Linux keyring Junie prefers): there is no file to copy, so log in once inside
+# the container (it then writes the shared secure_credentials.json), use
+# --auth/JUNIE_API_KEY, or put provider keys in config.json "byok" (built-in
+# provider models only).
+# The file set and source dir are agent-specific
 # (BOOTSTRAP_FILES / BOOTSTRAP_SRC_DIR).
 bootstrap_config() {
     local dst_dir="$1"
@@ -96,6 +114,38 @@ bootstrap_config() {
             chmod "$(stat -c '%a' "$src" 2>/dev/null || stat -f '%Lp' "$src")" "$dst"
         fi
     done
+}
+
+# Like bootstrap_config, but for a whole config subdirectory (e.g. Junie's
+# models/, mcp/, skills/, commands/, agents/) — each a directory of
+# profile/config files rather than a single file. Recursively copies every file
+# from the host agent dir into $dst_dir/<sub> only when the destination file is
+# missing (so anything created inside the container is preserved), applying the
+# same localhost/127.0.0.1 -> host.docker.internal rewrite to text files
+# (custom-model base URLs and MCP hosts commonly point at a local gateway).
+# Binary files are copied verbatim so packaged skills/extensions aren't
+# corrupted. Source base is the global BOOTSTRAP_SRC_DIR, mirroring
+# bootstrap_config (which also seeds the per-workspace override from the host).
+bootstrap_config_dir() {
+    local dst_dir="$1" sub="$2"
+    local src="$BOOTSTRAP_SRC_DIR/$sub"
+    [ -d "$src" ] || return 0
+    local dst="$dst_dir/$sub"
+    mkdir -p "$dst"
+    local f rel out mode
+    while IFS= read -r -d '' f; do
+        rel="${f#"$src"/}"
+        out="$dst/$rel"
+        [ -e "$out" ] && continue
+        mkdir -p "$(dirname "$out")"
+        if LC_ALL=C grep -qI . "$f" 2>/dev/null; then
+            sed -E 's/(localhost|127\.0\.0\.1)/host.docker.internal/g' "$f" > "$out"
+            mode="$(stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f")"
+            chmod "$mode" "$out"
+        else
+            cp -p "$f" "$out"
+        fi
+    done < <(find "$src" -type f -print0)
 }
 
 # Prepare host-side config before bringing up the container: recover any
@@ -115,8 +165,15 @@ prepare_config() {
         [ -f "$f" ] || : > "$f"
     done
     bootstrap_config "$SHARED_CONFIG_DIR"
+    local d
+    for d in "${BOOTSTRAP_DIRS[@]}"; do
+        bootstrap_config_dir "$SHARED_CONFIG_DIR" "$d"
+    done
     if [ -d "$OVERRIDE_SRC" ]; then
         bootstrap_config "$OVERRIDE_SRC"
+        for d in "${BOOTSTRAP_DIRS[@]}"; do
+            bootstrap_config_dir "$OVERRIDE_SRC" "$d"
+        done
     fi
 }
 
@@ -144,6 +201,7 @@ parse_args() {
             -h|--help)    show_help; exit 0 ;;
             claude)       AGENT=claude; shift ;;
             codex)        AGENT=codex; shift ;;
+            junie)        AGENT=junie; shift ;;
             bash)         SHELL_MODE=true; shift ;;
             stop)         STOP_MODE=true; shift ;;
             *) echo "pipod: unknown option: $1" >&2; show_help >&2; exit 1 ;;
@@ -157,6 +215,7 @@ parse_args() {
 # extracted so the per-agent RUN_CMD is unit-testable. See the comment block
 # below (in the main flow, where this is called) for the full layout rationale.
 select_agent() {
+    BOOTSTRAP_DIRS=()
     if [ "$AGENT" = codex ]; then
         AGENT_LABEL="Codex CLI"
         IMAGE_TAG="pipod-codex"
@@ -202,6 +261,42 @@ select_agent() {
         BOOTSTRAP_SRC_DIR="$HOME/.claude"
         BOOTSTRAP_FILES=(.credentials.json settings.json)
         RUN_CMD=(claude)
+    elif [ "$AGENT" = junie ]; then
+        AGENT_LABEL="Junie CLI"
+        IMAGE_TAG="pipod-junie"
+        CONTAINER_PREFIX="pipod-junie"
+        BUILD_DIR="$PROJECT_DIR/junie"
+        AGENT_KEY="junie"
+        WS_AGENT_DIR="$WS_DIR/$AGENT_KEY"
+        SHARED_CONFIG_DIR="$CONFIG_DIR/junie"
+        OVERRIDE_SRC="$WS_AGENT_DIR/config"
+        CONFIG_MOUNT_SRC="$CONFIG_DIR/junie"
+        CONFIG_MOUNT_DEST="/home/ubuntu/.junie"
+        OVERRIDE_DEST="/home/ubuntu/.junie"
+        CONFIG_ROOT="/home/ubuntu/.junie"
+        # Junie has no documented config-dir env var, so its fixed ~/.junie home
+        # is mounted directly (the container HOME is /home/ubuntu, so ~/.junie is
+        # /home/ubuntu/.junie). The platform binary + versions live under
+        # ~/.local/share/junie, baked into the image (per-container like the other
+        # agents' npm packages), so they are not bind-mounted. Per-task transcripts
+        # (under cli-sessions/sessions) and logs are isolated per workspace like
+        # the other agents' session data.
+        DATA_MOUNTS=(
+            "sessions|/home/ubuntu/.junie/cli-sessions/sessions"
+            "log|/home/ubuntu/.junie/logs"
+        )
+        DATA_FILE_MOUNTS=()
+        AGENT_ENV=()
+        BOOTSTRAP_SRC_DIR="$HOME/.junie"
+        BOOTSTRAP_FILES=(config.json settings.json allowlist.json secure_credentials.json)
+        # Junie discovers several features from per-user DIRECTORIES under
+        # ~/.junie (each a folder of profile/config files), so bootstrap them in
+        # addition to the single-file set above: models/ (custom model profiles,
+        # which embed their own BYOK key/base URL), mcp/ (MCP servers), skills/,
+        # commands/ (custom slash commands), agents/ (custom agents). extensions/
+        # is excluded (downloaded/cached binaries, not config).
+        BOOTSTRAP_DIRS=(models mcp skills commands agents)
+        RUN_CMD=(junie)
     else
         AGENT_LABEL="pi"
         IMAGE_TAG="pipod-pi-coding-agent"
@@ -259,15 +354,15 @@ WS_DIR="$CONFIG_DIR/workspaces/$WS_SLUG"
 
 # Agent-specific layout. Each agent gets its own image, container-name prefix,
 # Dockerfile subdir, and config mount. Per-workspace state is split by agent:
-# under $WS_DIR/<agent>/ (pi/claude/codex) lives that agent's per-project data
-# (DATA_MOUNTS / DATA_FILE_MOUNTS, bind-mounted over the shared agent home so it
-# shadows just those paths) plus an optional config/ override that replaces the
-# shared agent config for this one workspace. The shared agent home
+# under $WS_DIR/<agent>/ (pi/claude/codex/junie) lives that agent's per-project
+# data (DATA_MOUNTS / DATA_FILE_MOUNTS, bind-mounted over the shared agent home
+# so it shadows just those paths) plus an optional config/ override that replaces
+# the shared agent config for this one workspace. The shared agent home
 # ($CONFIG_MOUNT_SRC) holds only config identical across every workspace:
 # settings, auth, skills, plugins, etc.
 #
-# What counts as per-project data (per code.claude.com/docs and
-# developers.openai.com/codex):
+# What counts as per-project data (per code.claude.com/docs,
+# developers.openai.com/codex, and junie.jetbrains.com/docs):
 #   claude  ~/.claude/projects (transcripts, auto memory, subagents, tool-results;
 #          the in-container cwd is always /workspace, so every workspace would
 #          otherwise map to the SAME project key and clobber each other),
@@ -276,6 +371,8 @@ WS_DIR="$CONFIG_DIR/workspaces/$WS_SLUG"
 #   codex   ~/.codex/sessions (rollout transcripts), ~/.codex/state (SQLite DBs via
 #          CODEX_SQLITE_HOME — sharing these across projects corrupts the WAL and
 #          wedges startup with SQLITE_CANTOPEN), ~/.codex/log, ~/.codex/history.jsonl.
+#   junie   ~/.junie/cli-sessions/sessions (per-task transcripts: events.jsonl,
+#          transcript.md, subagents/), ~/.junie/logs (app + upgrade logs).
 #
 # Auto-cleaned ephemera (shell-snapshots, paste/image caches, session-env, debug,
 # plans, tasks, statsig) and Codex's self-update package cache are left in the

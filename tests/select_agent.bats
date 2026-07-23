@@ -67,17 +67,42 @@ setup_select_agent() {
     [[ "${AGENT_ENV[*]}" = *"CODEX_SQLITE_HOME=/home/ubuntu/.codex/state"* ]]
 }
 
+@test "junie agent: RUN_CMD is plain junie, config mounted at ~/.junie, config.json + settings.json + allowlist.json + secure_credentials.json bootstrapped" {
+    setup_select_agent
+    AGENT=junie
+    select_agent
+    [ "$AGENT_LABEL" = "Junie CLI" ]
+    [ "$IMAGE_TAG" = "pipod-junie" ]
+    [ "$CONTAINER_PREFIX" = "pipod-junie" ]
+    [ "$BUILD_DIR" = "$PROJECT_DIR/junie" ]
+    [ "$CONFIG_MOUNT_DEST" = "/home/ubuntu/.junie" ]
+    [ "$BOOTSTRAP_SRC_DIR" = "$HOME/.junie" ]
+    [ "${BOOTSTRAP_FILES[0]}" = config.json ]
+    [ "${BOOTSTRAP_FILES[1]}" = settings.json ]
+    [ "${BOOTSTRAP_FILES[2]}" = allowlist.json ]
+    [ "${BOOTSTRAP_FILES[3]}" = secure_credentials.json ]
+    [ "${#BOOTSTRAP_FILES[@]}" = 4 ]
+    [ "${BOOTSTRAP_DIRS[0]}" = models ]
+    [ "${BOOTSTRAP_DIRS[1]}" = mcp ]
+    [ "${BOOTSTRAP_DIRS[2]}" = skills ]
+    [ "${BOOTSTRAP_DIRS[3]}" = commands ]
+    [ "${BOOTSTRAP_DIRS[4]}" = agents ]
+    [ "${#BOOTSTRAP_DIRS[@]}" = 5 ]
+    [ "${RUN_CMD[0]}" = junie ]
+    [ "${#RUN_CMD[@]}" = 1 ]
+    # Junie has no config-dir env var, so AGENT_ENV is empty.
+    [ "${#AGENT_ENV[@]}" = 0 ]
+    # The override shares the config mount's destination (replaces shared config).
+    [ "$OVERRIDE_DEST" = "$CONFIG_MOUNT_DEST" ]
+    [ "$CONFIG_ROOT" = "/home/ubuntu/.junie" ]
+}
+
 @test "WS_AGENT_DIR is derived from WS_DIR and the agent key" {
     setup_select_agent
-    AGENT=codex
-    select_agent
-    [ "$WS_AGENT_DIR" = "$WS_DIR/codex" ]
-    AGENT=claude
-    select_agent
-    [ "$WS_AGENT_DIR" = "$WS_DIR/claude" ]
-    AGENT=pi
-    select_agent
-    [ "$WS_AGENT_DIR" = "$WS_DIR/pi" ]
+    AGENT=codex;  select_agent; [ "$WS_AGENT_DIR" = "$WS_DIR/codex" ]
+    AGENT=claude; select_agent; [ "$WS_AGENT_DIR" = "$WS_DIR/claude" ]
+    AGENT=junie;  select_agent; [ "$WS_AGENT_DIR" = "$WS_DIR/junie" ]
+    AGENT=pi;     select_agent; [ "$WS_AGENT_DIR" = "$WS_DIR/pi" ]
 }
 
 @test "each agent has its sessions dir in DATA_MOUNTS" {
@@ -85,4 +110,5 @@ setup_select_agent() {
     AGENT=pi;     select_agent; [[ "${DATA_MOUNTS[*]}" = *"/home/ubuntu/.pi/agent/sessions"* ]]
     AGENT=claude; select_agent; [[ "${DATA_MOUNTS[*]}" = *"/home/ubuntu/.claude/projects"* ]]
     AGENT=codex;  select_agent; [[ "${DATA_MOUNTS[*]}" = *"/home/ubuntu/.codex/sessions"* ]]
+    AGENT=junie;  select_agent; [[ "${DATA_MOUNTS[*]}" = *"/home/ubuntu/.junie/cli-sessions/sessions"* ]]
 }
