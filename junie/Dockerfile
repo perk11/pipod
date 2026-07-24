@@ -3,6 +3,12 @@ FROM ubuntu:26.04
 ARG HOST_UID=""
 ARG HOST_GID=""
 
+# Force a UTF-8 locale. The base image defaults to the C/POSIX locale, which is
+# ASCII-only, so the Junie CLI (a Node TUI) can't encode non-ASCII output and
+# renders Cyrillic, emoji, box-drawing, etc. as '?'. C.UTF-8 is built into
+# modern glibc (Ubuntu 26.04), so no `locales` package / locale-gen is needed.
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
+
 # git: Junie's /review, --merge/--rebase, and built-in commit workflows rely on
 # a git status snapshot of the workspace and .git markers.
 # curl + unzip: the @jetbrains/junie npm package is a wrapper whose postinstall
