@@ -7,7 +7,7 @@ ARG HOST_GID=""
 # ships built-in commit workflows that rely on a git status snapshot. No fd /
 # ripgrep: Codex is a Rust binary with built-in file/text search.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends nodejs npm git sudo && \
+    apt-get install -y --no-install-recommends nodejs npm git curl sudo && \
     rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @openai/codex

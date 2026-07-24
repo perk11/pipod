@@ -4,7 +4,7 @@ ARG HOST_UID=""
 ARG HOST_GID=""
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends nodejs npm fd-find ripgrep sudo && \
+    apt-get install -y --no-install-recommends nodejs npm fd-find ripgrep curl git sudo && \
     rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @earendil-works/pi-coding-agent

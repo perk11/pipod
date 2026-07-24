@@ -6,7 +6,7 @@ ARG HOST_GID=""
 # git is included because Claude Code's default system prompt ships built-in
 # commit/PR workflows and relies on a git status snapshot of the workspace.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends nodejs npm fd-find ripgrep git sudo && \
+    apt-get install -y --no-install-recommends nodejs npm fd-find ripgrep git curl sudo && \
     rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code
