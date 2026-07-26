@@ -42,94 +42,6 @@ disallowing specific shell commands.
     pipod
     ```
 
-## Running Claude Code
-
-To run [Claude Code](https://code.claude.com/) instead of pi, pass the `claude` command. Everything else works the same:
-
-```bash
-pipod claude          # start a Claude Code session
-pipod claude bash     # drop into a shell in the Claude container
-pipod claude -nn      # isolated, host-only network
-pipod claude -r       # force recreate the Claude container
-```
-
-Claude Code's config (`CLAUDE_CONFIG_DIR`) is **shared** across containers while per-project session data is isolated
-per workspace — see [How It Works](#how-it-works). Authentication (`.credentials.json`) is bootstrapped from your
-host's `~/.claude/` on first run and persists across sessions; log in interactively inside the container once if it
-isn't already set up.
-
-## Running Codex CLI
-
-To run the [OpenAI Codex CLI](https://developers.openai.com/codex/cli) instead of pi, pass the `codex` command.
-Everything else works the same:
-
-```bash
-pipod codex          # start a Codex session
-pipod codex bash     # drop into a shell in the Codex container
-pipod codex -nn      # isolated, host-only network
-pipod codex -r       # force recreate the Codex container
-```
-
-Codex's config (`CODEX_HOME`) is **shared** across containers while per-project data is isolated per workspace — see
-[How It Works](#how-it-works). Authentication (`auth.json`) is bootstrapped from your host's `~/.codex/` on first
-run; run `codex login` inside the container once if it isn't already set up.
-
-## Running Junie CLI
-
-To run the [JetBrains Junie CLI](https://junie.jetbrains.com/) instead of pi, pass the `junie` command.
-Everything else works the same:
-
-```bash
-pipod junie          # start a Junie session
-pipod junie bash     # drop into a shell in the Junie container
-pipod junie -nn      # isolated, host-only network
-pipod junie -r       # force recreate the Junie container
-```
-
-Junie's config home is the fixed `~/.junie` directory (it has no config-dir environment variable to relocate it, so
-pipod mounts the shared config there directly). It is **shared** across containers while per-project data is isolated
-per workspace — see [How It Works](#how-it-works). On first run pipod bootstraps, from your host's `~/.junie/`:
-
-- **Files:** `config.json` (base settings like `model`/`provider`/`flags`), `settings.json` (user/TUI settings, which
-  Junie resolves at *higher* precedence than `config.json`), `allowlist.json` (the action allowlist), and
-  `secure_credentials.json` (Junie's credential store — see auth below).
-- **Directories:** `models/` (custom model profiles, which embed their own BYOK key/base URL — e.g. `models/glm.json`
-  is used as `custom:glm`), `mcp/` (MCP servers), `skills/`, `commands/` (custom slash commands), and `agents/`
-  (custom agents).
-
-Each file is copied only if missing, with `localhost`/`127.0.0.1` rewritten to `host.docker.internal` so a model or MCP
-endpoint served on your host stays reachable.
-
-### Authentication
-
-Junie's activation gate needs a JetBrains-Account credential, independent of your model profile (a `custom:` model's
-own `apiKey` routes the LLM call but does **not** satisfy the gate). On your **host** this is usually already in place
-with **no separate Junie login**: if you're signed into a JetBrains IDE or Toolbox, Junie reuses that sign-in.
-
-That credential is stored in `~/.junie/secure_credentials.json`, which pipod bootstraps from your host on first run
-and bind-mounts live thereafter — so **it carries across automatically**: sign in once on the host (directly, or via
-the IDE/Toolbox) and every container is already authenticated, with no in-container login needed.
-
-The exception is hosts where Junie keeps the credential in the **OS keyring** instead of the file (macOS Keychain,
-Windows Credential Manager, or a Linux keyring Junie prefers): there's no file to copy, so the container starts
-unauthenticated — then run `pipod junie` once and complete the login. Junie writes the result to the shared
-`~/.junie/secure_credentials.json`, authenticating every later run, workspace container, and `pipod junie -r` recreation.
-
-Other ways to satisfy the gate:
-
-- a **Junie API key** (token from <https://junie.jetbrains.com/cli>): `pipod junie -- --auth perm-…`, or
-  `export JUNIE_API_KEY=…` inside the container;
-- for a **built-in-provider** model only, the provider key in `config.json`'s `byok` (a file pipod bootstraps):
-  ```json
-  { "model": "sonnet", "provider": "anthropic", "byok": { "anthropic": "sk-ant-..." } }
-  ```
-
-Note that the `@jetbrains/junie` npm package is a small launcher: its postinstall downloads the platform binary under
-`~/.local/share/junie` during image build, and the image build also runs `junie update` once to pre-download the
-latest release (the npm package is version-pinned and otherwise lags behind, so each container would self-update and
-re-download the full binary on first run). Junie's auto-update stays enabled, so it still picks up newer releases at
-runtime — this only bakes in the initial gap. Upgrading Junie uses `junie update` rather than `npm`.
-
 ## How It Works
 
 Each workspace directory is assigned its own persistent Docker container, named `pipod-<slug>[-nonet]` for pi,
@@ -152,62 +64,6 @@ session-scoped files, bind-mounted over the shared agent home so projects don't 
 allowing per-workspace model, auth, skills, plugins or settings overrides.
 
 To reference models running on `localhost`, use `host.docker.internal` as the host.
-
-| Path inside container             | Source on host                              | Purpose                                                |
-|-----------------------------------|---------------------------------------------|--------------------------------------------------------|
-| `/workspace`                      | Current working directory                   | Project files                                          |
-| `/home/ubuntu/.pi`                | `~/.pipod/`                                 | Shared config                                          |
-| `/home/ubuntu/.pi/agent`          | `~/.pipod/workspaces/<ws>/pi/config/`       | Per-workspace config override (if `config/` dir exists) |
-| `/home/ubuntu/.pi/agent/sessions` | `~/.pipod/workspaces/<ws>/pi/sessions/`     | Per-workspace sessions                                 |
-
-For Claude Code (`pipod claude`), `CLAUDE_CONFIG_DIR` relocates all of Claude's config (settings, skills, agents,
-plugins, and credentials) into the shared tree, while the **per-project data Claude writes each session is isolated per
-workspace** (the in-container cwd is always `/workspace`, so every workspace would otherwise map to the same Claude
-project key and clobber each other):
-
-| Path inside container                | Source on host                                   | Purpose                                                          |
-|--------------------------------------|--------------------------------------------------|------------------------------------------------------------------|
-| `/workspace`                         | Current working directory                        | Project files                                                    |
-| `/home/ubuntu/.claude`               | `~/.pipod/claude/`                               | Shared config (settings.json, CLAUDE.md, skills, `.credentials.json` auth) |
-| `/home/ubuntu/.claude`               | `~/.pipod/workspaces/<ws>/claude/config/`        | Per-workspace config override (replaces the shared config row above when present) |
-| `/home/ubuntu/.claude/projects`      | `~/.pipod/workspaces/<ws>/claude/sessions/`      | Per-project session transcripts, memory, subagents, tool-results |
-| `/home/ubuntu/.claude/file-history`  | `~/.pipod/workspaces/<ws>/claude/file-history/`  | Per-project file snapshots (checkpoint/rewind)                   |
-| `/home/ubuntu/.claude/history.jsonl` | `~/.pipod/workspaces/<ws>/claude/history.jsonl`  | Per-project prompt history (up-arrow recall)                     |
-
-> Claude Code's `~/.claude.json` (app state such as per-project trust/allowed-tool state) is not relocatable via
-> `CLAUDE_CONFIG_DIR`, so it stays in `$HOME` inside the container; since containers are per-workspace, each workspace
-> keeps its own. Authentication persists through the shared `.credentials.json` under the mounted config directory.
-
-For Codex (`pipod codex`), the `CODEX_HOME` config dir is **shared**, while the **per-project data Codex writes each
-session is isolated per workspace** (SQLite state DBs, session transcripts, logs, and prompt history):
-
-| Path inside container                | Source on host                                 | Purpose                                                          |
-|--------------------------------------|------------------------------------------------|------------------------------------------------------------------|
-| `/workspace`                         | Current working directory                      | Project files                                                    |
-| `/home/ubuntu/.codex`                | `~/.pipod/codex/`                              | Shared config (`config.toml`, `AGENTS.md`, rules, `auth.json` auth) |
-| `/home/ubuntu/.codex`                | `~/.pipod/workspaces/<ws>/codex/config/`       | Per-workspace config override (replaces the shared config row above when present) |
-| `/home/ubuntu/.codex/sessions`       | `~/.pipod/workspaces/<ws>/codex/sessions/`     | Per-project session transcripts                                  |
-| `/home/ubuntu/.codex/state`          | `~/.pipod/workspaces/<ws>/codex/state/`        | Per-project SQLite state DBs (`state_5.sqlite`, …), via `CODEX_SQLITE_HOME` |
-| `/home/ubuntu/.codex/log`            | `~/.pipod/workspaces/<ws>/codex/log/`          | Per-project logs                                                 |
-| `/home/ubuntu/.codex/history.jsonl`  | `~/.pipod/workspaces/<ws>/codex/history.jsonl` | Per-project prompt history                                       |
-
-> Codex's mutable SQLite state DBs (`state_5.sqlite`, `logs_2/goals_1/memories_1.sqlite`) are relocated out of the
-> shared `CODEX_HOME` via `CODEX_SQLITE_HOME`, because sharing them across projects would corrupt their WAL state and
-> wedge startup with `SQLITE_CANTOPEN`.
-
-For Junie (`pipod junie`), Junie has **no config-dir environment variable**, so its fixed `~/.junie` home is mounted
-in place (the container's `$HOME` is `/home/ubuntu`, so this is `/home/ubuntu/.junie`). Config is **shared** while the
-**per-project data Junie writes each session is isolated per workspace** (per-task transcripts and logs). The platform
-binary itself lives under `~/.local/share/junie`, baked into the image (per-container, like the other agents' npm
-packages), so it is not bind-mounted:
-
-| Path inside container                          | Source on host                                          | Purpose                                                          |
-|------------------------------------------------|--------------------------------------------------------|------------------------------------------------------------------|
-| `/workspace`                                   | Current working directory                              | Project files                                                    |
-| `/home/ubuntu/.junie`                          | `~/.pipod/junie/`                                      | Shared config (`config.json`, `settings.json`, `allowlist.json`, `secure_credentials.json`; `/account` keys live in the OS keyring — see above) |
-| `/home/ubuntu/.junie`                          | `~/.pipod/workspaces/<ws>/junie/config/`               | Per-workspace config override (replaces the shared config row above when present) |
-| `/home/ubuntu/.junie/cli-sessions/sessions`    | `~/.pipod/workspaces/<ws>/junie/sessions/`             | Per-project per-task transcripts (`events.jsonl`, `transcript.md`, `subagents/`) |
-| `/home/ubuntu/.junie/logs`                     | `~/.pipod/workspaces/<ws>/junie/log/`                  | Per-project app + upgrade logs                                   |
 
 > **Permissions:** The host UID/GID are mapped directly into the container so that file permissions match your local
 > host user.
@@ -263,20 +119,113 @@ Because the two modes use separate containers (`pipod-<slug>-nonet` for `--no-ne
 `pipod-<slug>`), switching between them is instant, but each container keeps its own installed packages.
 `-r` only recreates the corresponding container.
 
-## About the Docker Image
+## About the Docker Images
 
-The Docker image is based on Ubuntu 26.04 (with a plan to stick to Ubuntu LTS releases) and is built automatically by
-`./pipod` if it does not already exist. Passwordless sudo is enabled in the container to make dependency installation
+The Docker images are separate for each agent and are all based on Ubuntu 26.04 (with a plan to stick to Ubuntu LTS releases). 
+They are built automatically by `./pipod` if they do not already exist. Passwordless sudo is enabled in the container to make dependency installation
 simple.
 
 I chose Ubuntu over Alpine to make it easier to run many different projects without compatibility surprises.
 
-There are four images, each defined by its own `Dockerfile` in a subdirectory: `pi/Dockerfile` installs the
-`@earendil-works/pi-coding-agent` npm package, `claude/Dockerfile` installs `@anthropic-ai/claude-code`,
-`codex/Dockerfile` installs `@openai/codex`, and `junie/Dockerfile` installs `@jetbrains/junie` (the latter three also
-install `git`, which their built-in commit/PR/review workflows rely on; the Junie image additionally installs
-`curl` and `unzip` for the launcher's download/self-update mechanism). The script builds the right one based on
-whether you pass `claude`, `codex`, or `junie`.
+`pi/Dockerfile` installs the `@earendil-works/pi-coding-agent` npm package, `claude/Dockerfile` installs `@anthropic-ai/claude-code`,
+`codex/Dockerfile` installs `@openai/codex`, and `junie/Dockerfile` installs `@jetbrains/junie` The script builds the right one based on
+whether you pass `claude`, `codex`, or `junie`. The images also all include `curl` and `git` and some agent-specific CLI tools.
+
+
+## Running Claude Code/Codex/Junie
+
+To run [Claude Code](https://code.claude.com/)/[OpenAI Codex CLI](https://developers.openai.com/codex/cli)/[JetBrains Junie CLI](https://junie.jetbrains.com/), pass the apropriate command. Everything else works the same:
+
+```bash
+pipod claude          # start a Claude Code session
+pipod codex bash     # drop into a shell in the codex container
+pipod junie -nn      # isolated, host-only network
+```
+
+## Agent-specific mounts
+Claude Code's config (`CLAUDE_CONFIG_DIR`) is **shared** across containers while per-project session data is isolated
+per workspace. Authentication (`.credentials.json`) is bootstrapped from your
+host's `~/.claude/` on first run and persists across sessions; log in interactively inside the container once if it
+isn't already set up.
+
+| Path inside container             | Source on host                              | Purpose                                                |
+|-----------------------------------|---------------------------------------------|--------------------------------------------------------|
+| `/workspace`                      | Current working directory                   | Project files                                          |
+| `/home/ubuntu/.pi`                | `~/.pipod/`                                 | Shared config                                          |
+| `/home/ubuntu/.pi/agent`          | `~/.pipod/workspaces/<ws>/pi/config/`       | Per-workspace config override (if `config/` dir exists) |
+| `/home/ubuntu/.pi/agent/sessions` | `~/.pipod/workspaces/<ws>/pi/sessions/`     | Per-workspace sessions                                 |
+
+For Claude Code (`pipod claude`), `CLAUDE_CONFIG_DIR` relocates all of Claude's config (settings, skills, agents,
+plugins, and credentials) into the shared tree, while the **per-project data Claude writes each session is isolated per
+workspace** (the in-container cwd is always `/workspace`, so every workspace would otherwise map to the same Claude
+project key and clobber each other):
+
+| Path inside container                | Source on host                                   | Purpose                                                          |
+|--------------------------------------|--------------------------------------------------|------------------------------------------------------------------|
+| `/workspace`                         | Current working directory                        | Project files                                                    |
+| `/home/ubuntu/.claude`               | `~/.pipod/claude/`                               | Shared config (settings.json, CLAUDE.md, skills, `.credentials.json` auth) |
+| `/home/ubuntu/.claude`               | `~/.pipod/workspaces/<ws>/claude/config/`        | Per-workspace config override (replaces the shared config row above when present) |
+| `/home/ubuntu/.claude/projects`      | `~/.pipod/workspaces/<ws>/claude/sessions/`      | Per-project session transcripts, memory, subagents, tool-results |
+| `/home/ubuntu/.claude/file-history`  | `~/.pipod/workspaces/<ws>/claude/file-history/`  | Per-project file snapshots (checkpoint/rewind)                   |
+| `/home/ubuntu/.claude/history.jsonl` | `~/.pipod/workspaces/<ws>/claude/history.jsonl`  | Per-project prompt history (up-arrow recall)                     |
+
+> Claude Code's `~/.claude.json` (app state such as per-project trust/allowed-tool state) is not relocatable via
+> `CLAUDE_CONFIG_DIR`, so it stays in `$HOME` inside the container; since containers are per-workspace, each workspace
+> keeps its own. Authentication persists through the shared `.credentials.json` under the mounted config directory.
+
+Codex's config (`CODEX_HOME`) is **shared** across containers while per-project data is isolated per workspace. 
+Authentication (`auth.json`) is bootstrapped from your host's `~/.codex/` on first
+run; run `codex login` inside the container once if it isn't already set up.
+
+| Path inside container                | Source on host                                 | Purpose                                                          |
+|--------------------------------------|------------------------------------------------|------------------------------------------------------------------|
+| `/workspace`                         | Current working directory                      | Project files                                                    |
+| `/home/ubuntu/.codex`                | `~/.pipod/codex/`                              | Shared config (`config.toml`, `AGENTS.md`, rules, `auth.json` auth) |
+| `/home/ubuntu/.codex`                | `~/.pipod/workspaces/<ws>/codex/config/`       | Per-workspace config override (replaces the shared config row above when present) |
+| `/home/ubuntu/.codex/sessions`       | `~/.pipod/workspaces/<ws>/codex/sessions/`     | Per-project session transcripts                                  |
+| `/home/ubuntu/.codex/state`          | `~/.pipod/workspaces/<ws>/codex/state/`        | Per-project SQLite state DBs (`state_5.sqlite`, …), via `CODEX_SQLITE_HOME` |
+| `/home/ubuntu/.codex/log`            | `~/.pipod/workspaces/<ws>/codex/log/`          | Per-project logs                                                 |
+| `/home/ubuntu/.codex/history.jsonl`  | `~/.pipod/workspaces/<ws>/codex/history.jsonl` | Per-project prompt history                                       |
+
+> Codex's mutable SQLite state DBs (`state_5.sqlite`, `logs_2/goals_1/memories_1.sqlite`) are relocated out of the
+> shared `CODEX_HOME` via `CODEX_SQLITE_HOME`, because sharing them across projects would corrupt their WAL state and
+> wedge startup with `SQLITE_CANTOPEN`.
+
+Junie's config home is the fixed `~/.junie` directory (it has no config-dir environment variable to relocate it, so
+pipod mounts the shared config there directly). It is **shared** across containers while per-project data is isolated
+per workspace — see [How It Works](#how-it-works). On first run pipod bootstraps, from your host's `~/.junie/`:
+
+- **Files:** `config.json` (base settings like `model`/`provider`/`flags`), `settings.json` (user/TUI settings, which
+  Junie resolves at *higher* precedence than `config.json`), `allowlist.json` (the action allowlist), and
+  `secure_credentials.json` (Junie's credential store — see auth below).
+- **Directories:** `models/` (custom model profiles, which embed their own BYOK key/base URL — e.g. `models/glm.json`
+  is used as `custom:glm`), `mcp/` (MCP servers), `skills/`, `commands/` (custom slash commands), and `agents/`
+  (custom agents).
+
+| Path inside container                          | Source on host                                          | Purpose                                                          |
+|------------------------------------------------|--------------------------------------------------------|------------------------------------------------------------------|
+| `/workspace`                                   | Current working directory                              | Project files                                                    |
+| `/home/ubuntu/.junie`                          | `~/.pipod/junie/`                                      | Shared config (`config.json`, `settings.json`, `allowlist.json`, `secure_credentials.json`; `/account` keys live in the OS keyring — see above) |
+| `/home/ubuntu/.junie`                          | `~/.pipod/workspaces/<ws>/junie/config/`               | Per-workspace config override (replaces the shared config row above when present) |
+| `/home/ubuntu/.junie/cli-sessions/sessions`    | `~/.pipod/workspaces/<ws>/junie/sessions/`             | Per-project per-task transcripts (`events.jsonl`, `transcript.md`, `subagents/`) |
+| `/home/ubuntu/.junie/logs`                     | `~/.pipod/workspaces/<ws>/junie/log/`                  | Per-project app + upgrade logs        
+
+
+
+### Junie Authentication
+
+Junie needs a JetBrains-Account credential, independent of your model profile (a `custom:` model's
+own `apiKey` routes the LLM call but does **not** satisfy the gate). On your **host** this is usually already in place
+with **no separate Junie login**: if you're signed into a JetBrains IDE or Toolbox, Junie reuses that sign-in.
+
+That credential is stored in `~/.junie/secure_credentials.json`, which pipod bootstraps from your host on first run
+and bind-mounts live thereafter — so **it carries across automatically**: sign in once on the host (directly, or via
+the IDE/Toolbox) and every container is already authenticated, with no in-container login needed.
+
+The exception is hosts where Junie keeps the credential in the **OS keyring** instead of the file (macOS Keychain,
+Windows Credential Manager, or a Linux keyring Junie prefers): there's no file to copy, so the container starts
+unauthenticated — then run `pipod junie` once and complete the login. Junie writes the result to the shared
+`~/.junie/secure_credentials.json`, authenticating every later run, workspace container, and `pipod junie -r` recreation.
 
 `pi`/`claude`/`codex` are installed without version pinning, so the latest published version is fetched when an image is first
 built. `@jetbrains/junie` is likewise installed unpinned; its postinstall downloads the matching platform binary, and
@@ -286,6 +235,7 @@ cache and won't pick up newer versions automatically. To upgrade an agent
 and other dependencies, either run `pi update` / `claude update` / `codex update` / `junie update` inside a `pipod bash` (or
 `pipod claude bash` / `pipod codex bash` / `pipod junie bash`) session, or rebuild the image from scratch with `-r`.  
 Note that recreating a container discards any changes you made inside it.
+
 
 ```bash
 ./pipod --no-cache -r           # rebuild the pi image/container
