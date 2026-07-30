@@ -16,6 +16,15 @@ load test_helper
     [[ "$output" == *"Stop the current workspace/agent container"* ]]
 }
 
+@test "help lists the new update command" {
+    run "$PIPOD" --help
+    [[ "$output" == *"  update"* ]]
+    [[ "$output" == *"via its own self-update"* ]]
+    [[ "$output" == *"global npm installs under /usr/local"* ]]
+    [[ "$output" == *"sudo -H"* ]]
+    [[ "$output" == *"recreates the container"* ]]
+}
+
 @test "help lists the new --no-tty option" {
     run "$PIPOD" --help
     [[ "$output" == *"--no-tty"* ]]

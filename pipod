@@ -21,6 +21,12 @@ Commands:
   bash              Open an interactive bash shell inside the container
   stop              Stop the current workspace/agent container without removing it
                     (it is reused next time)
+  update            Upgrade the agent inside the existing container via its own self-update
+                    (`pi update --self`, `claude update`, `codex update`, or `junie update`).
+                    pi/claude/codex are global npm installs under /usr/local, so they run as
+                    root (sudo -H); Junie updates its user-owned binary, so no sudo. Never
+                    recreates the container or rebuilds the image, so apt/npm packages
+                    installed inside it are preserved. Needs Internet (won't work with -nn).
 
 Options:
   -nn, --no-network Only allow access to the host (host.docker.internal), block the Internet.
@@ -178,15 +184,16 @@ prepare_config() {
 }
 
 # Parse pipod's own CLI args into module-level globals: AGENT, RECREATE,
-# NO_CACHE, SHELL_MODE, STOP_MODE, NO_NETWORK, NO_TTY, EXTRA_ARGS. Anything
-# after `--` is captured verbatim into EXTRA_ARGS for forwarding to the agent
-# (or to bash in shell mode), bypassing pipod's own flags. Extracted so the
-# parser is unit-testable.
+# NO_CACHE, SHELL_MODE, STOP_MODE, UPDATE_MODE, NO_NETWORK, NO_TTY, EXTRA_ARGS.
+# Anything after `--` is captured verbatim into EXTRA_ARGS for forwarding to the
+# agent (or to bash in shell mode), bypassing pipod's own flags. Extracted so
+# the parser is unit-testable.
 parse_args() {
     RECREATE=false
     NO_CACHE=""
     SHELL_MODE=false
     STOP_MODE=false
+    UPDATE_MODE=false
     NO_NETWORK=false
     NO_TTY=false
     AGENT=pi
@@ -204,16 +211,18 @@ parse_args() {
             junie)        AGENT=junie; shift ;;
             bash)         SHELL_MODE=true; shift ;;
             stop)         STOP_MODE=true; shift ;;
+            update)       UPDATE_MODE=true; shift ;;
             *) echo "pipod: unknown option: $1" >&2; show_help >&2; exit 1 ;;
         esac
     done
 }
 
 # Set agent-specific globals (AGENT_LABEL, IMAGE_TAG, CONTAINER_PREFIX,
-# BUILD_DIR, mounts, env, BOOTSTRAP_*, RUN_CMD, …) based on $AGENT. Depends on
-# $PROJECT_DIR, $CONFIG_DIR, $WS_DIR, and $HOME being set by the caller —
-# extracted so the per-agent RUN_CMD is unit-testable. See the comment block
-# below (in the main flow, where this is called) for the full layout rationale.
+# BUILD_DIR, mounts, env, BOOTSTRAP_*, RUN_CMD, UPDATE_CMD, …) based on $AGENT.
+# Depends on $PROJECT_DIR, $CONFIG_DIR, $WS_DIR, and $HOME being set by the
+# caller — extracted so the per-agent RUN_CMD/UPDATE_CMD are unit-testable. See
+# the comment block below (in the main flow, where this is called) for the full
+# layout rationale.
 select_agent() {
     BOOTSTRAP_DIRS=()
     if [ "$AGENT" = codex ]; then
@@ -239,6 +248,11 @@ select_agent() {
         BOOTSTRAP_SRC_DIR="$HOME/.codex"
         BOOTSTRAP_FILES=(auth.json config.toml)
         RUN_CMD=(codex --yolo)
+        # Global npm install under root-owned /usr/local: codex update runs npm
+        # and needs root to write there. `sudo -H` runs it as root but pins
+        # HOME=/root so npm's cache (and any incidental writes) stay out of the
+        # mounted user home instead of becoming root-owned there.
+        UPDATE_CMD=(sudo -H codex update)
     elif [ "$AGENT" = claude ]; then
         AGENT_LABEL="Claude Code"
         IMAGE_TAG="pipod-claude"
@@ -261,6 +275,10 @@ select_agent() {
         BOOTSTRAP_SRC_DIR="$HOME/.claude"
         BOOTSTRAP_FILES=(.credentials.json settings.json)
         RUN_CMD=(claude)
+        # Global npm install under root-owned /usr/local: claude update needs
+        # root to write there. `sudo -H` runs it as root but pins HOME=/root so
+        # npm's cache stays out of the mounted user home.
+        UPDATE_CMD=(sudo -H claude update)
     elif [ "$AGENT" = junie ]; then
         AGENT_LABEL="Junie CLI"
         IMAGE_TAG="pipod-junie"
@@ -297,6 +315,11 @@ select_agent() {
         # is excluded (downloaded/cached binaries, not config).
         BOOTSTRAP_DIRS=(models mcp skills commands agents)
         RUN_CMD=(junie)
+        # junie update downloads the platform binary into the user-owned
+        # ~/.local/share/junie and refreshes the ~/.local/bin/junie shim — it
+        # never touches the root-owned npm package under /usr/local, so it runs
+        # as the ubuntu user (no sudo; HOME must stay /home/ubuntu).
+        UPDATE_CMD=(junie update)
     else
         AGENT_LABEL="pi"
         IMAGE_TAG="pipod-pi-coding-agent"
@@ -316,6 +339,12 @@ select_agent() {
         BOOTSTRAP_SRC_DIR="$HOME/.pi/agent"
         BOOTSTRAP_FILES=(models.json auth.json)
         RUN_CMD=(pi)
+        # `pi update --self` updates the pi CLI itself (plain `pi update` does
+        # too, but --self is explicit). pi is a global npm install under
+        # root-owned /usr/local, so without root it aborts with "install path is
+        # not writable"; `sudo -H` runs it as root and keeps npm's cache under
+        # /root instead of the mounted user home.
+        UPDATE_CMD=(sudo -H pi update --self)
     fi
 }
 
@@ -412,6 +441,44 @@ if [ "$STOP_MODE" = true ]; then
             ;;
     esac
     exit 0
+fi
+
+# `update` short-circuits before any build/create/recreate work: it brings the
+# workspace/agent container to a running state (start/unpause if needed — never
+# recreate) and runs the agent's own self-update command (UPDATE_CMD) inside it.
+# Unlike a normal session run it does NOT rebuild the image or recreate the
+# container, so apt/npm packages installed in the container are preserved and
+# only the agent itself is upgraded in place. pi/claude/codex are global npm
+# installs under root-owned /usr/local, so their UPDATE_CMD is prefixed with
+# `sudo -H` (runs as root, HOME pinned to /root so npm's cache doesn't become
+# root-owned in the mounted user home); Junie updates its user-owned platform
+# binary, so it needs no sudo. Requires Internet access; under --no-network the
+# container can't reach the registry, so the update will likely fail (a warning
+# is printed).
+if [ "$UPDATE_MODE" = true ]; then
+    STATUS=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || echo "missing")
+    case "$STATUS" in
+        running)
+            ;;
+        exited|dead|created)
+            echo "Starting container $CONTAINER_NAME"
+            docker start "$CONTAINER_NAME" >/dev/null
+            ;;
+        paused)
+            echo "Unpausing container $CONTAINER_NAME"
+            docker unpause "$CONTAINER_NAME" >/dev/null
+            ;;
+        *)
+            echo "pipod: container $CONTAINER_NAME does not exist; run '$0' first to create it, then '$0 update' to upgrade $AGENT_LABEL." >&2
+            exit 1
+            ;;
+    esac
+    if [ "$NO_NETWORK" = true ]; then
+        echo "pipod: warning: --no-network is set; $CONTAINER_NAME has no Internet access, so this update will likely fail." >&2
+    fi
+    echo "Updating $AGENT_LABEL inside $CONTAINER_NAME"
+    docker exec "$CONTAINER_NAME" "${UPDATE_CMD[@]}"
+    exit $?
 fi
 
 # Remove existing container if -r.

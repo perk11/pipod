@@ -27,6 +27,11 @@ setup_select_agent() {
     [ "${BOOTSTRAP_FILES[1]}" = auth.json ]
     [ "${RUN_CMD[0]}" = pi ]
     [ "${#RUN_CMD[@]}" = 1 ]
+    [ "${UPDATE_CMD[0]}" = sudo ]
+    [ "${UPDATE_CMD[1]}" = -H ]
+    [ "${UPDATE_CMD[2]}" = pi ]
+    [ "${UPDATE_CMD[3]}" = update ]
+    [ "${UPDATE_CMD[4]}" = --self ]
     # AGENT_ENV is a single -e flag for pi
     [[ "${AGENT_ENV[*]}" = *"PI_CODING_AGENT_DIR=/home/ubuntu/.pi/agent"* ]]
 }
@@ -45,6 +50,10 @@ setup_select_agent() {
     [ "${BOOTSTRAP_FILES[1]}" = settings.json ]
     [ "${RUN_CMD[0]}" = claude ]
     [ "${#RUN_CMD[@]}" = 1 ]
+    [ "${UPDATE_CMD[0]}" = sudo ]
+    [ "${UPDATE_CMD[1]}" = -H ]
+    [ "${UPDATE_CMD[2]}" = claude ]
+    [ "${UPDATE_CMD[3]}" = update ]
     [[ "${AGENT_ENV[*]}" = *"CLAUDE_CONFIG_DIR=/home/ubuntu/.claude"* ]]
 }
 
@@ -63,6 +72,10 @@ setup_select_agent() {
     [ "${RUN_CMD[0]}" = codex ]
     [ "${RUN_CMD[1]}" = --yolo ]
     [ "${#RUN_CMD[@]}" = 2 ]
+    [ "${UPDATE_CMD[0]}" = sudo ]
+    [ "${UPDATE_CMD[1]}" = -H ]
+    [ "${UPDATE_CMD[2]}" = codex ]
+    [ "${UPDATE_CMD[3]}" = update ]
     [[ "${AGENT_ENV[*]}" = *"CODEX_HOME=/home/ubuntu/.codex"* ]]
     [[ "${AGENT_ENV[*]}" = *"CODEX_SQLITE_HOME=/home/ubuntu/.codex/state"* ]]
 }
@@ -90,6 +103,9 @@ setup_select_agent() {
     [ "${#BOOTSTRAP_DIRS[@]}" = 5 ]
     [ "${RUN_CMD[0]}" = junie ]
     [ "${#RUN_CMD[@]}" = 1 ]
+    [ "${UPDATE_CMD[0]}" = junie ]
+    [ "${UPDATE_CMD[1]}" = update ]
+    [ "${#UPDATE_CMD[@]}" = 2 ]
     # Junie has no config-dir env var, so AGENT_ENV is empty.
     [ "${#AGENT_ENV[@]}" = 0 ]
     # The override shares the config mount's destination (replaces shared config).

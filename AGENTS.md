@@ -145,6 +145,12 @@ Codex; `config.json`/`settings.json`/`allowlist.json`/`secure_credentials.json` 
 ./pipod junie       # use the Junie image/container instead, run junie
 ./pipod junie -r    # force recreate the Junie container
 ./pipod bash        # shell inside the pi container (add `claude`, `codex`, or `junie` for the others)
+./pipod update      # upgrade pi inside its existing container via `sudo -H pi update --self` (add `claude`/`codex`/`junie`
+                    # for the others: `sudo -H claude update`/`sudo -H codex update`/`junie update`). pi/claude/codex
+                    # are global npm installs under root-owned /usr/local, so they self-update as root (sudo -H,
+                    # HOME pinned to /root so npm's cache doesn't become root-owned in the mounted user home);
+                    # Junie updates its user-owned platform binary under ~/.local, so no sudo. Brings the container
+                    # to a running state (start/unpause, never recreate) and runs the agent's self-update in place.
 ```
 
 ## Conventions & guardrails

@@ -18,6 +18,7 @@ parse() {
     assert_eq "NO_CACHE"     ""      "$NO_CACHE"
     assert_eq "SHELL_MODE"   "false" "$SHELL_MODE"
     assert_eq "STOP_MODE"    "false" "$STOP_MODE"
+    assert_eq "UPDATE_MODE"  "false" "$UPDATE_MODE"
     assert_eq "NO_NETWORK"   "false" "$NO_NETWORK"
     assert_eq "NO_TTY"       "false" "$NO_TTY"
     assert_eq "EXTRA_ARGS#"  "0"     "${#EXTRA_ARGS[@]}"
@@ -46,6 +47,11 @@ parse() {
 @test "stop enables stop mode" {
     parse stop
     [ "$STOP_MODE" = true ]
+}
+
+@test "update enables update mode" {
+    parse update
+    [ "$UPDATE_MODE" = true ]
 }
 
 @test "-nn and --no-network both set NO_NETWORK" {
@@ -122,6 +128,13 @@ parse() {
     [ "$AGENT" = claude ]
     [ "$NO_NETWORK" = true ]
     [ "$STOP_MODE" = true ]
+}
+
+@test "agent and -nn combine with update" {
+    parse codex -nn update
+    [ "$AGENT" = codex ]
+    [ "$NO_NETWORK" = true ]
+    [ "$UPDATE_MODE" = true ]
 }
 
 @test "multiple flags combine freely" {

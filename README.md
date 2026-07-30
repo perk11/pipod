@@ -83,6 +83,7 @@ To reference models running on `localhost`, use `host.docker.internal` as the ho
 | `-h`, `--help`        | Show the help message                                                                                  |
 | `bash`                | Open an interactive shell inside the container                                                         |
 | `stop`                | Stop the current workspace/agent container without removing it (it is reused next time). Honors the agent and `-nn`/`-r` selection, e.g. `pipod claude -nn stop`. |
+| `update`              | Upgrade the agent inside the existing container via its own self-update (`pi update --self`, `claude update`, `codex update`, or `junie update`). pi/claude/codex are global npm installs under root-owned `/usr/local`, so they run as root (`sudo -H`); Junie updates its user-owned binary, so it needs no sudo. Doesn't rebuild the image or recreate the container, so packages installed inside are preserved, but updates won't carry over to other projects. Needs Internet, so it won't work with `--no-network`.|
 | `--`                  | End of pipod's own options. Everything after `--` is forwarded verbatim to the agent (or to `bash` in shell mode). |
 
 Flags can be combined, e.g. `pipod --no-cache -r -nn` rebuilds without cache and recreates the no-network container.
@@ -93,6 +94,11 @@ pipod claude stop          # stop the Claude container
 pipod codex stop           # stop the Codex container
 pipod junie stop           # stop the Junie container
 pipod -nn stop             # stop the no-network container
+
+pipod update               # upgrade pi inside its existing container
+pipod claude update        # upgrade Claude Code inside its existing container
+pipod codex update         # upgrade Codex CLI inside its existing container
+pipod junie update         # upgrade Junie inside its existing container
 
 # Pass arguments through to the agent
 pipod -- --print "Summarize this codebase"      # runs `pi --print "..."`
@@ -232,13 +238,18 @@ built. `@jetbrains/junie` is likewise installed unpinned; its postinstall downlo
 the build then runs `junie update` once to pre-download the latest release (the npm package's pinned build otherwise
 lags behind, so each container would re-download the full binary on first run). Later invocations reuse the Docker
 cache and won't pick up newer versions automatically. To upgrade an agent
-and other dependencies, either run `pi update` / `claude update` / `codex update` / `junie update` inside a `pipod bash` (or
-`pipod claude bash` / `pipod codex bash` / `pipod junie bash`) session, or rebuild the image from scratch with `-r`.  
-Note that recreating a container discards any changes you made inside it.
+and other dependencies, either run the built-in `update` subcommand (the easiest path — it runs the agent's own
+self-update inside the existing container without recreating it, so anything you installed there is preserved),
+or rebuild the image from scratch with `-r`. Note that recreating a container discards any changes you made inside it.
 
 
 ```bash
-./pipod --no-cache -r           # rebuild the pi image/container
+./pipod update               # upgrade pi inside its existing container
+./pipod claude update        # upgrade Claude Code inside its existing container
+./pipod codex update         # upgrade Codex CLI inside its existing container
+./pipod junie update         # upgrade Junie inside its existing container
+
+./pipod --no-cache -r           # rebuild the pi image/container from scratch
 ./pipod claude --no-cache -r    # rebuild the Claude Code image/container
 ./pipod codex --no-cache -r     # rebuild the Codex image/container
 ./pipod junie --no-cache -r     # rebuild the Junie image/container
@@ -255,7 +266,7 @@ not running at the moment this command runs.
 
 The `pipod` script is covered by [bats-core](https://github.com/bats-core/bats-core) tests under `tests/`. They
 exercise the argument parser (`parse_args`), per-agent setup (`select_agent`), the `--help` output, the `stop`
-command, and end-to-end `--` argument forwarding through a mocked `docker` binary. The `package.json` for the suite
+and `update` commands, and end-to-end `--` argument forwarding through a mocked `docker` binary. The `package.json` for the suite
 lives under `tests/` too (not at the repo root) — it pins `bats` as a dev dependency so the tests are self-contained.
 
 ```bash
@@ -265,7 +276,7 @@ npm --prefix tests install
 npm --prefix tests test
 ```
 
-The mock-docker suites (`tests/stop.bats`, `tests/exec.bats`) do **not** require Docker to be installed — they shim
+The mock-docker suites (`tests/stop.bats`, `tests/update.bats`, `tests/exec.bats`) do **not** require Docker to be installed — they shim
 `docker` with `tests/docker-mock`. The unit tests under `tests/parse_args.bats` and `tests/select_agent.bats` source
 `pipod` directly (a source-guard skips the main flow when sourced). Add new behavior to `pipod` by extracting it into
 a small function next to `parse_args`/`select_agent` and adding a `.bats` file alongside the others.
