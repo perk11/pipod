@@ -3,10 +3,16 @@ FROM ubuntu:26.04
 ARG HOST_UID=""
 ARG HOST_GID=""
 
-# git is included because Claude Code's default system prompt ships built-in
-# commit/PR workflows and relies on a git status snapshot of the workspace.
+# git and gh are included because Claude Code's default system prompt ships
+# built-in commit/PR workflows (which call `gh` for GitHub operations) and
+# relies on a git status snapshot of the workspace. openssh-client and less are
+# only *Recommends* of git, which --no-install-recommends drops: without the
+# former, ssh:// and git@ remotes can't be fetched or pushed at all; without the
+# latter, git/gh have no pager. jq is what the agent reaches for to filter
+# `gh api` and other JSON output. No fd: Claude Code has a built-in Glob tool
+# and never shells out to it (and Ubuntu installs the binary as `fdfind`).
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends nodejs npm fd-find ripgrep git curl sudo && \
+    apt-get install -y --no-install-recommends nodejs npm ripgrep git gh jq less openssh-client curl sudo && \
     rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code

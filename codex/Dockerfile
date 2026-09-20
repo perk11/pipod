@@ -6,8 +6,10 @@ ARG HOST_GID=""
 # git is included because Codex detects the project root via .git markers and
 # ships built-in commit workflows that rely on a git status snapshot. No fd /
 # ripgrep: Codex is a Rust binary with built-in file/text search.
+# openssh-client is only a *Recommends* of git, which --no-install-recommends
+# drops: without it, ssh:// and git@ remotes can't be fetched or pushed.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends nodejs npm git curl sudo && \
+    apt-get install -y --no-install-recommends nodejs npm git curl openssh-client sudo && \
     rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @openai/codex

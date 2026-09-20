@@ -3,8 +3,10 @@ FROM ubuntu:26.04
 ARG HOST_UID=""
 ARG HOST_GID=""
 
+# openssh-client is only a *Recommends* of git, which --no-install-recommends
+# drops: without it, ssh:// and git@ remotes can't be fetched or pushed.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends nodejs npm fd-find ripgrep curl git sudo && \
+    apt-get install -y --no-install-recommends nodejs npm fd-find ripgrep curl git openssh-client sudo && \
     rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @earendil-works/pi-coding-agent
