@@ -18,10 +18,12 @@ version) into the image built from its own `Dockerfile` under `pi/`, `claude/`, 
 | `codex/Dockerfile`                            | Same base/user setup, plus `git` (no `fd`/`ripgrep` — Codex has built-in search); installs `@openai/codex` globally. Used when invoked as `pipod codex`.            |
 | `junie/Dockerfile`                            | Same base/user setup, plus `git`, `curl`, `unzip`; installs `@jetbrains/junie` globally. Its postinstall downloads the platform binary into `~/.local/share/junie`, so the build forces `HOME=/home/ubuntu` so the launcher finds it at runtime (otherwise the build-as-root `HOME=/root` would put it in the wrong place). The build then runs `junie update` once to pre-download the latest release (the npm package is version-pinned and lags behind, so each container would otherwise auto-update and re-download the full binary on first run); the stale npm-pinned version is removed. Auto-update stays enabled. Used when invoked as `pipod junie`. |
 | `README.md`                                   | User-facing docs.                                                                                                                                          |
-| `tests/`                                      | bats-core test suite (run from this dir via `npm install && npm test`, or `npm --prefix tests test` from the repo root). `package.json` here pins `bats` as a dev dependency; `test_helper.bash` sources `pipod` (a source-guard skips the main flow when sourced); `parse_args.bats`/`select_agent.bats` unit-test those functions; `help.bats` checks the `--help` output; `stop.bats`/`exec.bats` run pipod end-to-end against `docker-mock` (no Docker needed). |
+| `tests/`                                      | bats-core test suite (run from this dir via `npm install && npm test`, or `npm --prefix tests test` from the repo root). `package.json` here pins `bats` as a dev dependency; `test_helper.bash` sources `pipod` (a source-guard skips the main flow when sourced); `parse_args.bats`/`select_agent.bats`/`host_timezone.bats` unit-test those functions; `help.bats` checks the `--help` output; `stop.bats`/`exec.bats` run pipod end-to-end against `docker-mock` (no Docker needed). |
 
 All four images install `openssh-client`. It is only a *Recommends* of `git`, which the `--no-install-recommends`
-builds drop, so without it `ssh://` and `git@` remotes can't be fetched or pushed from any container.
+builds drop, so without it `ssh://` and `git@` remotes can't be fetched or pushed from any container. They also all
+install `tzdata` (with `DEBIAN_FRONTEND=noninteractive`, which skips its region prompt), so the `TZ` that `pipod` sets
+resolves for glibc tools (`date`, git, python), not just Node.
 
 > **All pipod state lives outside the repo**, at `~/.pipod/` on the host (`$CONFIG_DIR` in the script). (On first run
 > after the upgrade from the pre-split `~/.pi/pipod/`, pipod moves that directory to `~/.pipod/` once.) For pi the
@@ -98,7 +100,10 @@ Most logic is agent-agnostic; the per-agent differences are captured in a block 
 - **Env**: pi `PI_CODING_AGENT_DIR=/home/ubuntu/.pi/agent`; Claude `CLAUDE_CONFIG_DIR=/home/ubuntu/.claude`; Codex
   `CODEX_HOME=/home/ubuntu/.codex` plus `CODEX_SQLITE_HOME=/home/ubuntu/.codex/state`; Junie sets **no** env var — it
   has no documented config-dir override, so it uses its default `~/.junie` (which is `/home/ubuntu/.junie` in the
-  container) and `~/.local/share/junie` for the binary/versions (baked into the image, not bind-mounted). Claude Code's `~/.claude.json`
+  container) and `~/.local/share/junie` for the binary/versions (baked into the image, not bind-mounted). Every agent also gets
+  `TZ=<host IANA zone>` at `docker run` (from `host_timezone`: a non-path `$TZ`, else the `/etc/localtime` symlink
+  target, else `/etc/timezone`; omitted if none resolves). It's captured once at creation, so a changed host timezone
+  needs `-r`. Claude Code's `~/.claude.json`
   (app state/per-project trust) is **not** relocatable via `CLAUDE_CONFIG_DIR`; it lives in `$HOME` inside the
   container, and since containers are per-workspace each workspace keeps its own (auth persists through the shared
   `.credentials.json`).

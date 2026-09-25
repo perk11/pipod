@@ -5,8 +5,10 @@ ARG HOST_GID=""
 
 # openssh-client is only a *Recommends* of git, which --no-install-recommends
 # drops: without it, ssh:// and git@ remotes can't be fetched or pushed.
+# tzdata: pipod passes the host timezone as TZ; glibc tools (date, git, python)
+# need the zoneinfo files to resolve it. noninteractive skips its region prompt.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends nodejs npm fd-find ripgrep curl git openssh-client sudo && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs npm fd-find ripgrep curl git openssh-client sudo tzdata && \
     rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @earendil-works/pi-coding-agent

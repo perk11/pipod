@@ -16,8 +16,10 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 # fetches/extracts channel updates at runtime, so both are required.
 # openssh-client is only a *Recommends* of git, which --no-install-recommends
 # drops: without it, ssh:// and git@ remotes can't be fetched or pushed.
+# tzdata: pipod passes the host timezone as TZ; glibc tools (date, git, python)
+# need the zoneinfo files to resolve it. noninteractive skips its region prompt.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends nodejs npm git curl unzip openssh-client sudo && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs npm git curl unzip openssh-client sudo tzdata && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Junie CLI. The npm package's postinstall downloads the platform binary

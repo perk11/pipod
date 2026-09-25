@@ -11,8 +11,10 @@ ARG HOST_GID=""
 # latter, git/gh have no pager. jq is what the agent reaches for to filter
 # `gh api` and other JSON output. No fd: Claude Code has a built-in Glob tool
 # and never shells out to it (and Ubuntu installs the binary as `fdfind`).
+# tzdata: pipod passes the host timezone as TZ; glibc tools (date, git, python)
+# need the zoneinfo files to resolve it. noninteractive skips its region prompt.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends nodejs npm ripgrep git gh jq less openssh-client curl sudo && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs npm ripgrep git gh jq less openssh-client curl sudo tzdata && \
     rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code

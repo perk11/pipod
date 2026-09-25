@@ -348,6 +348,26 @@ select_agent() {
     fi
 }
 
+# Print the host's IANA timezone name (e.g. Europe/Berlin), or nothing if it
+# can't be determined. An explicit $TZ wins unless it is a file path, which
+# wouldn't resolve inside the container; otherwise it comes from the
+# /etc/localtime symlink target (Linux and macOS), then Debian's /etc/timezone.
+host_timezone() {
+    local tz="${TZ:-}"
+    tz="${tz#:}"
+    if [ -n "$tz" ] && [[ "$tz" != /* ]]; then
+        echo "$tz"
+        return
+    fi
+    local link
+    link="$(readlink /etc/localtime 2>/dev/null)" || link=""
+    if [[ "$link" == *zoneinfo/* ]]; then
+        echo "${link##*zoneinfo/}"
+    elif [ -r /etc/timezone ]; then
+        head -n 1 /etc/timezone
+    fi
+}
+
 # When sourced (e.g. by the test suite), expose the functions above without
 # enabling strict mode or running the main flow.
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
@@ -585,6 +605,11 @@ if [ -z "$EXISTING" ]; then
         ADD_HOST=(--add-host=host.docker.internal:"${gw:-host-gateway}")
     fi
 
+    # Captured once at creation; a changed host timezone needs `-r` to apply.
+    TZ_ENV=()
+    HOST_TZ="$(host_timezone)"
+    [ -n "$HOST_TZ" ] && TZ_ENV=(-e "TZ=$HOST_TZ")
+
     echo "Starting container $CONTAINER_NAME"
     docker run -d \
         --name "$CONTAINER_NAME" \
@@ -592,6 +617,7 @@ if [ -z "$EXISTING" ]; then
         "${ADD_HOST[@]}" \
         $NETWORK_OPT \
         "${AGENT_ENV[@]}" \
+        "${TZ_ENV[@]}" \
         "${VOLUMES[@]}" \
         -w /workspace \
         "$IMAGE_TAG" \
